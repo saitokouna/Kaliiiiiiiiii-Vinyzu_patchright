@@ -11,9 +11,6 @@ It currently passes for sure (tested on Win10):
 
 Warnings: 
 * the **Only chromium** part for Playwright is patched.
-* This will overwrite your default playwright package.
-
-Note: For testing with Playwright and undetected-playwright, use multiple venv's
 
 ## Demos (tested on Win 10)
 ![img.png](assets/nowsecure_nl.png)
@@ -22,7 +19,7 @@ Note: For testing with Playwright and undetected-playwright, use multiple venv's
 
 ## Dependencies
 
-* Google-Chrome installed (`channel="chrome"` recommended)
+* Google-Chrome installed (`channel="chrome"` recommended, default)
 
 ## Installation
 
@@ -33,6 +30,34 @@ execute in your shell console
 pip install undetected-playwright-patch
 ```
 
+#### Installation note for UNIX//Linux
+
+<details>
+
+<summary>Resolve "Permission Denied" error (click to expand)</summary>
+
+On UNIX-based OS, you might run into the following errors
+```
+Permission denied: '...python3.**/site-packages/undetected_playwright/driver/playwright.sh'
+```
+and
+```
+...python3.**/site-packages/undetected_playwright/driver/node: Permission denied
+```
+
+To resolve them, simply run
+```shell
+chmod +x <The path your terminal tells you>.sh
+# so smth like: ...python3.**/site-packages/undetected_playwright/driver/playwright.sh
+```
+and
+```
+chmod +x <The path your terminal tells you for node>
+# so smth like: ...python3.**/site-packages/undetected_playwright/driver/node
+```
+
+</details>
+
 #### Build from this repo:
 ```
 git clone https://github.com/kaliiiiiiiiii/undetected-playwright-python
@@ -41,15 +66,13 @@ python -m pip install -r local-requirements.txt
 python build_patched.py
 ```
 
-[//]: # (run `pip install undetected-playwright-python` in your terminal)
-
 ## Example
 
 ```python
 import asyncio
 
 # undetected-playwright here!
-from playwright.async_api import async_playwright, Playwright
+from undetected_playwright.async_api import async_playwright, Playwright
 
 
 async def run(playwright: Playwright):
@@ -57,7 +80,7 @@ async def run(playwright: Playwright):
     
     # disable navigator.webdriver:true flag
     args.append("--disable-blink-features=AutomationControlled")
-    browser = await playwright.chromium.launch(channel="chrome", headless=False,
+    browser = await playwright.chromium.launch(headless=False,
                                                args=args)
     page = await browser.new_page()
     await page.goto("https://nowsecure.nl/#relax")
@@ -82,7 +105,7 @@ if __name__ == "__main__":
 ```py
 
 # undetected-playwright here!
-from playwright.sync_api import sync_playwright
+from undetected_playwright.sync_api import sync_playwright
 
 
 with sync_playwright() as p:
@@ -90,7 +113,7 @@ with sync_playwright() as p:
     
     # disable navigator.webdriver:true flag
     args.append("--disable-blink-features=AutomationControlled")
-    browser = p.chromium.launch(args=args, headless=False, channel="chrome")
+    browser = p.chromium.launch(args=args, headless=False)
     page = browser.new_page()
     page.goto("https://nowsecure.nl/#relax")
     input("Press ENTER to continue to Creep-JS:")
@@ -121,4 +144,3 @@ See the original
 
 ## TODO's
 - [ ] add GitHub runner to build releases automated
-
