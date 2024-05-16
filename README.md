@@ -138,9 +138,13 @@ See the original
 
 ### [Capsolver](https://is.gd/OJSVP4)
 
-<a href="https://is.gd/OJSVP4" >
+<a href="https://is.gd/lvbCwX" >
   <img src="https://github.com/kaliiiiiiiiii/Selenium-Driverless/blob/master/assets/capsolver.png" alt="drawing" width="60%"/>
 </a>
+
+<!---
+https://is.gd/stats.php?url=lvbCwX
+--->
 
 
 
