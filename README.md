@@ -13,8 +13,10 @@ Warnings:
 * the **Only chromium** part for Playwright is patched.
 
 ## Demos (tested on Win 10)
-![img.png](assets/nowsecure_nl.png)
-![img.png](assets/creep_js.png)
+<p float="left">
+    <img src="assets/nowsecure_nl.png" alt="drawing" width="49%"/>
+    <img src="assets/creep_js.png" alt="drawing" width="49%"/>
+</p>
 
 
 ## Dependencies
@@ -131,6 +133,18 @@ See the original
 ## API Reference
 
 [https://playwright.dev/python/docs/api/class-playwright](https://playwright.dev/python/docs/api/class-playwright)
+
+## Sponsors
+
+### [Capsolver](https://is.gd/OJSVP4)
+
+<a href="https://is.gd/lvbCwX" >
+  <img src="https://github.com/kaliiiiiiiiii/Selenium-Driverless/blob/master/assets/capsolver.png" alt="drawing" width="60%"/>
+</a>
+
+<!---
+https://is.gd/stats.php?url=lvbCwX
+--->
 
 
 
