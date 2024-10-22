@@ -138,12 +138,12 @@ See the original
 
 ### [Capsolver](https://is.gd/lvbCwX)
 
-<a href="https://is.gd/lvbCwX" >
-  <img src="https://github.com/kaliiiiiiiiii/Selenium-Driverless/blob/master/assets/capsolver.png" alt="drawing" width="60%"/>
+<a href="https://is.gd/NvJySN" >
+  <img src="https://github.com/kaliiiiiiiiii/Selenium-Driverless/blob/master/assets/CapSolver Ads.png" alt="drawing" width="60%"/>
 </a>
 
 <!---
-https://is.gd/stats.php?url=lvbCwX
+https://is.gd/stats.php?url=NvJySN
 --->
 
 
