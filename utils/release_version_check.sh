@@ -41,7 +41,7 @@ playwright_version=$(get_latest_release "microsoft/playwright")
 echo "Latest release of the Playwright Driver: $playwright_version"
 
 # Get the latest release version of Patchright
-patchright_version=$(get_latest_release REPO)
+patchright_version=$(get_latest_release $REPO)
 echo "Latest release of the Patchright Driver: $patchright_version"
 
 # Compare the versions
