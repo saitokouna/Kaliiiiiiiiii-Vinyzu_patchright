@@ -1,160 +1,142 @@
-# 🎭 [Playwright](https://playwright.dev) for Python 
+<h1 align="center">
+    🎭 Patchright
+</h1>
 
-[![PyPI version](https://badge.fury.io/py/undetected-playwright-patch.svg)](https://badge.fury.io/py/undetected-playwright-patch)
 
-This is a patch of the original playwright implementation for Python.
-
-It currently passes for sure (tested on Win10):
-- ✅ [CloudFare] 
-- ✅ [Bet365] (shape//F5 I think)
-- [Others] Unknown/Not tested
-
-Warnings: 
-* the **Only chromium** part for Playwright is patched.
-
-## Demos (tested on Win 10)
-<p float="left">
-    <img src="assets/nowsecure_nl.png" alt="drawing" width="49%"/>
-    <img src="assets/creep_js.png" alt="drawing" width="49%"/>
+<p align="center">
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/blob/main/LICENSE">
+        <img src="https://img.shields.io/badge/License-Apache%202.0-green">
+    </a>
+    <a>
+        <img src="https://img.shields.io/badge/Based%20on-Playwright-goldenrod">
+    </a>
+    <a>
+        <img src="https://img.shields.io/badge/Driver-Patched-blue">
+    </a>
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/releases/latest">
+        <img alt="Patchright Version" src="https://img.shields.io/github/v/release/microsoft/playwright?display_name=release&label=Version">
+    </a>
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/releases">
+        <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/Kaliiiiiiiiii-Vinyzu/patchright/total">
+    </a>
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python">
+        <img src="https://img.shields.io/badge/Package-Python-seagreen">
+    </a>
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs">
+        <img src="https://img.shields.io/badge/Package-NodeJS-seagreen">
+    </a>
 </p>
 
+#### Patchright is a patched and undetected version of the Playwright Testing and Automation Framework. </br> It can be used as a drop-in replacement for Playwright.
 
-## Dependencies
+> [!NOTE]  
+> This repository serves the Patchright Driver. To use Patchright, check out the [Python Package](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python) or the [NodeJS Package](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs).
 
-* Google-Chrome installed (`channel="chrome"` recommended, default)
+> [!WARNING]  
+> Patchright only patches CHROMIUM based browsers. Firefox and Webkit are not supported.
 
-## Installation
+---
 
-#### From PyPi (recommended)
+## Patches
 
-execute in your shell console
-```shell
-pip install undetected-playwright-patch
-```
+### [Runtime.enable](https://vanilla.aslushnikov.com/?Runtime.enable) Leak
+This is the biggest Patch Patchright uses. To avoid detection by this leak, patchright avoids using [Runtime.enable](https://vanilla.aslushnikov.com/?Runtime.enable) by executing Javascript in (isolated) ExecutionContexts.
 
-#### Installation note for UNIX//Linux
+### [Console.enable](https://vanilla.aslushnikov.com/?Console.enable) Leak
+Patchright patches this leak by disabling the Console API all together. This means, console functionality will not work in Patchright. If you really need the console, you might be better off using Javascript loggers, although they also can be easily detected.
+
+### Command Flags Leaks
+Patchright tweaks the Playwright Default Args to avoid detection by Command Flag Leaks. This (most importantly) affects:
+- `--disable-blink-features=AutomationControlled` (added) to avoid navigator.webdriver detection.
+- `--enable-automation` (removed) to avoid navigator.webdriver detection.
+- `--disable-popup-blocking` (removed) to avoid popup crashing.
+- `--disable-component-update` (removed) to avoid detection as a Stealth Driver.
+- `--disable-default-apps` (removed) to enable default apps.
+- `--disable-extensions` (removed) to enable extensions
+
+### General Leaks
+Patchright patches some general leaks in the Playwright codebase. This mainly includes poor setups and obvious detection points.
+
+---
+
+## Stealth
+
+With the right setup, Patchright currently is considered undetectable.
+Patchright passes:
+- [Brotector](https://kaliiiiiiiiii.github.io/brotector/) ✅ (with [CDP-Patches](https://github.com/Kaliiiiiiiiii-Vinyzu/CDP-Patches/))
+- [Cloudflare](https://cloudflare.com/) ✅
+- [Kasada](https://www.kasada.io/) ✅
+- [Akamai](https://www.akamai.com/products/bot-manager/) ✅
+- [Shape/F5](https://www.f5.com/) ✅
+- [Bet365](https://bet365.com/) ✅
+- [Datadome](https://datadome.co/products/bot-protection/) ✅
+- [Fingerprint.com](https://fingerprint.com/products/bot-detection/) ✅
+- [CreepJS](https://abrahamjuliot.github.io/creepjs/) ✅
+- [Sannysoft](https://bot.sannysoft.com/) ✅
+- [Incolumitas](https://bot.incolumitas.com/) ✅
+- [IPHey](https://iphey.com/) ✅
+- [Browserscan](https://browserscan.net/) ✅
+- [Pixelscan](https://pixelscan.net/) ✅
+
+---
+
+## Bugs
+#### Even though we have spent a lot of time to make Patchright as stable as possible, bugs may still occur. If you encounter any bugs, please report them in the [Issues](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/issues).
+
+> [!WARNING]  
+> Currently, Patchright may experience some unintended behavior when evaluating JavaScript in the browser.
+> This will be fixed when the Option to choose Execution Context (Main/Isolated) is implemented.
+> See the [TODO](#todo) for more information.
+
+> [!WARNING]  
+> Patchright passes most, but not all the Playwright tests. Some bugs are considered impossible to solve, some are just not relevant. See the list of bugs and their explanation [here](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/issues).
+
+#### Based on the Playwright Tests, we concluded that its highly unlikely that you will be affected by these bugs in regular usecases.
 
 <details>
+    <summary><b>Init Script Shenanigans</b></summary>
 
-<summary>Resolve "Permission Denied" error (click to expand)</summary>
+### Explanation
+To be able to use InitScripts without [Runtime.enable](https://vanilla.aslushnikov.com/?Runtime.enable), Patchright uses Playwright Routes to inject JavaScript into HTML requests.
 
-On UNIX-based OS, you might run into the following errors
-```
-Permission denied: '...python3.**/site-packages/undetected_playwright/driver/playwright.sh'
-```
-and
-```
-...python3.**/site-packages/undetected_playwright/driver/node: Permission denied
-```
+### Bugs
+Playwright Routes may cause some bugs in other parts of your code. Patchright InitScripts won't cause any bugs that wouldn't be caused by normal Playwright Routes. </br> If you want any of these bugs fixed, you'll have to contact the Playwright team.
 
-To resolve them, simply run
-```shell
-chmod +x <The path your terminal tells you>.sh
-# so smth like: ...python3.**/site-packages/undetected_playwright/driver/playwright.sh
-```
-and
-```
-chmod +x <The path your terminal tells you for node>
-# so smth like: ...python3.**/site-packages/undetected_playwright/driver/node
-```
+### Leaks
+Patchright InitScripts can be detected by Timing Attacks. However, no antibot currently checks for this kind of Timing Attack and they probably won't for a good amount of time. </br> We consider them not to be a big risk of detection.
 
 </details>
 
-#### Build from this repo:
-```
-git clone https://github.com/kaliiiiiiiiii/undetected-playwright-python
-cd undetected-playwright-python
-python -m pip install -r local-requirements.txt
-python build_patched.py
-```
+---
 
-## Example
+### TODO
+- [ ] Implement Option to choose Execution Context (Main/Isolated).
+- [ ] Fix Fixable Bugs.
+- [ ] Implement .patch Updater to easily show Patchright's patches.
+- [ ] Setup Automated Testing on new Release.
+- [ ] Implement Patchright on .NET and Java.
 
-```python
-import asyncio
+---
 
-# undetected-playwright here!
-from undetected_playwright.async_api import async_playwright, Playwright
+## Development
 
+Deployment of new Patchright versions are automatic, but bugs due to Playwright codebase changes may occur. Fixes for these bugs might take a few days to be released. 
 
-async def run(playwright: Playwright):
-    args = []
-    
-    # disable navigator.webdriver:true flag
-    args.append("--disable-blink-features=AutomationControlled")
-    browser = await playwright.chromium.launch(headless=False,
-                                               args=args)
-    page = await browser.new_page()
-    await page.goto("https://nowsecure.nl/#relax")
-    input("Press ENTER to continue to Creep-JS:")
-    await page.goto("https://nowsecure.nl/#relax")
-    await page.goto("https://abrahamjuliot.github.io/creepjs/")
-    input("Press ENTER to exit:")
-    await browser.close()
+---
 
+## Support our work
 
-async def main():
-    async with async_playwright() as playwright:
-        await run(playwright)
+If you choose to support our work, please contact [@vinyzu](https://discord.com/users/935224495126487150) or [@steve_abcdef](https://discord.com/users/936292409426477066) on Discord.
 
+---
 
-if __name__ == "__main__":
-    loop = asyncio.ProactorEventLoop()
-    loop.run_until_complete(main())
-    # asyncio.run(main) # should work for non-Windows as well
-```
+## Copyright and License
+© [Vinyzu](https://github.com/Vinyzu/)
 
-```py
+Patchright is licensed [Apache 2.0](https://choosealicense.com/licenses/apache-2.0/)
 
-# undetected-playwright here!
-from undetected_playwright.sync_api import sync_playwright
+---
 
+## Authors
 
-with sync_playwright() as p:
-    args = []
-    
-    # disable navigator.webdriver:true flag
-    args.append("--disable-blink-features=AutomationControlled")
-    browser = p.chromium.launch(args=args, headless=False)
-    page = browser.new_page()
-    page.goto("https://nowsecure.nl/#relax")
-    input("Press ENTER to continue to Creep-JS:")
-    page.goto("https://nowsecure.nl/#relax")
-    page.goto("https://abrahamjuliot.github.io/creepjs/")
-    input("Press ENTER to exit:")
-    browser.close()
-```
-
-## Documentation
-
-See the original
-[https://playwright.dev/python/docs/intro](https://playwright.dev/python/docs/intro)
-
-## API Reference
-
-[https://playwright.dev/python/docs/api/class-playwright](https://playwright.dev/python/docs/api/class-playwright)
-
-## Sponsors
-
-### [Capsolver](https://is.gd/lvbCwX)
-
-<a href="https://is.gd/NvJySN" >
-  <img src="https://github.com/kaliiiiiiiiii/Selenium-Driverless/blob/master/assets/CapSolver Ads.png" alt="drawing" width="60%"/>
-</a>
-
-<!---
-https://is.gd/stats.php?url=NvJySN
---->
-
-
-
-## Patches
-- [ ] [`Runtime.enable`](https://chromedevtools.github.io/devtools-protocol/tot/Runtime/#method-enable)
-  - [x] remove Runtime.enable occurences
-  - [x] patch _context(world) getter
-    - [x] isolatedWorld (utility)
-    - [ ] main world (main)
-    - [x] reset on frame-reload//navigation
-
-## TODO's
-- [ ] add GitHub runner to build releases automated
+#### Active Maintainer: [Vinyzu](https://github.com/Vinyzu/) </br> Co-Maintainer: [Kaliiiiiiiiii](https://github.com/kaliiiiiiiiii/)
