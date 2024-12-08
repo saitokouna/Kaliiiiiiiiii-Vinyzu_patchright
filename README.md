@@ -16,14 +16,17 @@
     <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/releases/latest">
         <img alt="Patchright Version" src="https://img.shields.io/github/v/release/microsoft/playwright?display_name=release&label=Version">
     </a>
-    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/releases">
-        <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/Kaliiiiiiiiii-Vinyzu/patchright/total">
-    </a>
     <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python">
         <img src="https://img.shields.io/badge/Package-Python-seagreen">
     </a>
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python/releases">
+        <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/pepy/dt/patchright?color=red&label=Python%20Downloads">
+    </a>
     <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs">
         <img src="https://img.shields.io/badge/Package-NodeJS-seagreen">
+    </a>
+    <a href="https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs/releases">
+        <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/npm/d18m/patchright?color=red&label=NodeJS%20Downloads">
     </a>
 </p>
 
@@ -89,7 +92,7 @@ Patchright passes:
 > See the [TODO](#todo) for more information.
 
 > [!WARNING]  
-> Patchright passes most, but not all the Playwright tests. Some bugs are considered impossible to solve, some are just not relevant. See the list of bugs and their explanation [here](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/issues).
+> Patchright passes most, but not all the Playwright tests. Some bugs are considered impossible to solve, some are just not relevant. See the list of bugs and their explanation [here](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/issues/30).
 
 #### Based on the Playwright Tests, we concluded that its highly unlikely that you will be affected by these bugs in regular usecases.
 

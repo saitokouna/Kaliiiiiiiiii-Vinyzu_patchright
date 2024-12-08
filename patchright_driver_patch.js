@@ -257,6 +257,16 @@ if (routeAssignment) {
     );
 }
 
+// -- _updateProtocolRequestInterceptionForSession Method --
+const updateProtocolRequestInterceptionForSessionMethod = crNetworkManagerClass.getMethod("_updateProtocolRequestInterceptionForSession");
+// Remove old loop and logic for localFrames and isolated world creation
+updateProtocolRequestInterceptionForSessionMethod.getStatements().forEach((statement) => {
+  const text = statement.getText();
+  // Check if the statement matches the patterns
+  if (text.includes('const cachePromise = info.session.send(\'Network.setCacheDisabled\', { cacheDisabled: enabled });'))
+    statement.replaceWithText('const cachePromise = info.session.send(\'Network.setCacheDisabled\', { cacheDisabled: false });');
+});
+
 // ------- RouteImpl Class -------
 const routeImplClass = crNetworkManagerSourceFile.getClass("RouteImpl");
 // -- RouteImpl Constructor --
@@ -396,7 +406,7 @@ onClearLifecycleBody.insertStatements(0, "this._isolatedWorld = undefined;");
 
 // -- _getFrameMainFrameContextId Method --
 // Define the getFrameMainFrameContextIdCode
-const getFrameMainFrameContextIdCode = `var globalDocument = await client._sendMayFail('DOM.getFrameOwner', { frameId: this._id });
+/*const getFrameMainFrameContextIdCode = `var globalDocument = await client._sendMayFail('DOM.getFrameOwner', { frameId: this._id });
   if (globalDocument && globalDocument.nodeId) {
     for (const executionContextId of this._page._delegate._sessionForFrame(this)._parsedExecutionContextIds) {
       var documentObj = await client._sendMayFail("DOM.resolveNode", { nodeId: globalDocument.nodeId });
@@ -421,7 +431,22 @@ const getFrameMainFrameContextIdCode = `var globalDocument = await client._sendM
       }
     }
   }
-  return 0;`;
+  return 0;`;*/
+const getFrameMainFrameContextIdCode = `var globalDocument = await client._sendMayFail("DOM.getFrameOwner", {frameId: this._id,});
+  if (globalDocument && globalDocument.nodeId) {
+    var descibedNode = await client._sendMayFail("DOM.describeNode", {
+      backendNodeId: globalDocument.backendNodeId,
+    });
+    if (descibedNode) {
+      var resolvedNode = await client._sendMayFail("DOM.resolveNode", {
+        nodeId: descibedNode.node.contentDocument.nodeId,
+      });
+      var _executionContextId = parseInt(resolvedNode.object.objectId.split(".")[1], 10);
+      return _executionContextId;
+      }
+    }
+    return 0;`;
+
 // Add the method to the class
 frameClass.addMethod({
   name: "_getFrameMainFrameContextId",
@@ -448,7 +473,7 @@ const contextMethodCode = `
       await this._page._delegate._mainFrameSession._client._sendMayFail("DOM.resolveNode", { nodeId: globalDoc.nodeId })
     }
 
-    if (this.isDetached()) throw new Error('Frame was detached');
+    // if (this.isDetached()) throw new Error('Frame was detached');
     try {
       var client = this._page._delegate._sessionForFrame(this)._client
     } catch (e) { var client = this._page._delegate._mainFrameSession._client }
@@ -484,7 +509,10 @@ const contextMethodCode = `
       var result = await client._sendMayFail('Page.createIsolatedWorld', {
         frameId: this._id, grantUniveralAccess: true, worldName: world
       });
-      if (!result) { return }
+      if (!result) {
+        // if (this.isDetached()) throw new Error("Frame was detached");
+        return
+      }
       var executionContextId = result.executionContextId
       var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
       this._isolatedWorld = new FrameExecutionContext(crContext, this, world)
@@ -711,13 +739,13 @@ const addRendererListenersMethod = frameSessionClass.getMethod(
 );
 const addRendererListenersMethodBody = addRendererListenersMethod.getBody();
 // Insert a new line of code before the first statement
-addRendererListenersMethodBody.insertStatements(
+/*addRendererListenersMethodBody.insertStatements(
   0,
   `this._client._sendMayFail("Debugger.enable", {});
 eventsHelper.addEventListener(this._client, 'Debugger.scriptParsed', event => {
   if (!this._parsedExecutionContextIds.includes(event.executionContextId)) this._parsedExecutionContextIds.push(event.executionContextId);
 })`,
-);
+);*/
 
 // -- _initialize Method --
 const initializeFrameSessionMethod = frameSessionClass.getMethod("_initialize");
