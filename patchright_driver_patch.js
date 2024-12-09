@@ -467,11 +467,11 @@ getFrameMainFrameContextIdMethod.setBodyText(
 
 // -- _context Method --
 const contextMethodCode = `
-    await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.enable');
+    /* await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.enable');
     var globalDoc = await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.getFrameOwner', { frameId: this._id });
     if (globalDoc) {
       await this._page._delegate._mainFrameSession._client._sendMayFail("DOM.resolveNode", { nodeId: globalDoc.nodeId })
-    }
+    } */
 
     // if (this.isDetached()) throw new Error('Frame was detached');
     try {
