@@ -432,19 +432,21 @@ onClearLifecycleBody.insertStatements(0, "this._isolatedWorld = undefined;");
     }
   }
   return 0;`;*/
-const getFrameMainFrameContextIdCode = `var globalDocument = await client._sendMayFail("DOM.getFrameOwner", {frameId: this._id,});
-  if (globalDocument && globalDocument.nodeId) {
-    var descibedNode = await client._sendMayFail("DOM.describeNode", {
-      backendNodeId: globalDocument.backendNodeId,
-    });
-    if (descibedNode) {
-      var resolvedNode = await client._sendMayFail("DOM.resolveNode", {
-        nodeId: descibedNode.node.contentDocument.nodeId,
+const getFrameMainFrameContextIdCode = `try {
+    var globalDocument = await client._sendMayFail("DOM.getFrameOwner", {frameId: this._id,});
+    if (globalDocument && globalDocument.nodeId) {
+      var describedNode = await client._sendMayFail("DOM.describeNode", {
+        backendNodeId: globalDocument.backendNodeId,
       });
-      var _executionContextId = parseInt(resolvedNode.object.objectId.split(".")[1], 10);
-      return _executionContextId;
+      if (describedNode) {
+        var resolvedNode = await client._sendMayFail("DOM.resolveNode", {
+          nodeId: describedNode.node.contentDocument.nodeId,
+        });
+        var _executionContextId = parseInt(resolvedNode.object.objectId.split(".")[1], 10);
+        return _executionContextId;
+        }
       }
-    }
+    } catch (e) {}
     return 0;`;
 
 // Add the method to the class
