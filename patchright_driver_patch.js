@@ -1190,7 +1190,6 @@ if (initScriptConstructorAssignment) {
     `this.source = \`(() => { \${source} })();\`;`,
   );
 }
-
 // ------- addPageBinding Function -------
 const addPageBindingFunction = pageSourceFile.getFunction("addPageBinding");
 const parameters = addPageBindingFunction.getParameters();
@@ -1232,6 +1231,54 @@ for (const statement of statements) {
     }
   }
 }
+// ------- Worker Class -------
+const workerClass = pageSourceFile.getClass("Worker");
+// -- evaluateExpression Method --
+const workerEvaluateExpressionMethod = workerClass.getMethod("evaluateExpression");
+workerEvaluateExpressionMethod.addParameter({
+    name: "isolatedContext",
+    type: "boolean",
+    hasQuestionToken: true,
+});
+const workerEvaluateExpressionMethodBody = workerEvaluateExpressionMethod.getBody();
+workerEvaluateExpressionMethodBody.replaceWithText(
+    workerEvaluateExpressionMethodBody.getText().replace(/await this\._executionContextPromise/g, "context")
+);
+// Insert the new line of code after the responseAwaitStatement
+workerEvaluateExpressionMethodBody.insertStatements(
+  0,
+  `let context = await this._executionContextPromise;
+  if (context.constructor.name === "FrameExecutionContext") {
+      const frame = context.frame;
+      if (frame) {
+          if (isolatedContext) context = await frame._utilityContext();
+          else if (!isolatedContext) context = await frame._mainContext();
+      }
+  }`,
+);
+// -- evaluateExpressionHandle Method --
+const workerEvaluateExpressionHandleMethod = workerClass.getMethod("evaluateExpressionHandle");
+workerEvaluateExpressionHandleMethod.addParameter({
+    name: "isolatedContext",
+    type: "boolean",
+    hasQuestionToken: true,
+});
+const workerEvaluateExpressionHandleMethodBody = workerEvaluateExpressionHandleMethod.getBody();
+workerEvaluateExpressionHandleMethodBody.replaceWithText(
+    workerEvaluateExpressionHandleMethodBody.getText().replace(/await this\._executionContextPromise/g, "context")
+);
+// Insert the new line of code after the responseAwaitStatement
+workerEvaluateExpressionHandleMethodBody.insertStatements(
+  0,
+  `let context = await this._executionContextPromise;
+  if (this._context.constructor.name === "FrameExecutionContext") {
+      const frame = this._context.frame;
+      if (frame) {
+          if (isolatedContext) context = await frame._utilityContext();
+          else if (!isolatedContext) context = await frame._mainContext();
+      }
+  }`,
+);
 
 // ----------------------------
 // server/clock.ts
@@ -1257,6 +1304,303 @@ await Promise.all(this._browserContext.pages().map(async page => {
   }));
 }));`,
 );
+
+// ----------------------------
+// server/javascript.ts
+// ----------------------------
+const javascriptSourceFile = project.addSourceFileAtPath(
+  "packages/playwright-core/src/server/javascript.ts",
+);
+
+// -------JSHandle Class -------
+const jsHandleClass = javascriptSourceFile.getClass("JSHandle");
+// -- evaluateExpression Method --
+const jsHandleEvaluateExpressionMethod = jsHandleClass.getMethod("evaluateExpression");
+jsHandleEvaluateExpressionMethod.addParameter({
+    name: "isolatedContext",
+    type: "boolean",
+    hasQuestionToken: true,
+});
+const jsHandleEvaluateExpressionMethodBody = jsHandleEvaluateExpressionMethod.getBody();
+jsHandleEvaluateExpressionMethodBody.replaceWithText(
+    jsHandleEvaluateExpressionMethodBody.getText().replace(/this\._context/g, "context")
+);
+// Insert the new line of code after the responseAwaitStatement
+jsHandleEvaluateExpressionMethodBody.insertStatements(
+  0,
+  `let context = this._context;
+  if (context.constructor.name === "FrameExecutionContext") {
+      const frame = context.frame;
+      if (frame) {
+          if (isolatedContext) context = await frame._utilityContext();
+          else if (!isolatedContext) context = await frame._mainContext();
+      }
+  }`,
+);
+// -- evaluateExpressionHandle Method --
+const jsHandleEvaluateExpressionHandleMethod = jsHandleClass.getMethod("evaluateExpressionHandle");
+jsHandleEvaluateExpressionHandleMethod.addParameter({
+    name: "isolatedContext",
+    type: "boolean",
+    hasQuestionToken: true,
+});
+const jsHandleEvaluateExpressionHandleMethodBody = jsHandleEvaluateExpressionHandleMethod.getBody();
+jsHandleEvaluateExpressionHandleMethodBody.replaceWithText(
+    jsHandleEvaluateExpressionHandleMethodBody.getText().replace(/this\._context/g, "context")
+);
+// Insert the new line of code after the responseAwaitStatement
+jsHandleEvaluateExpressionHandleMethodBody.insertStatements(
+  0,
+  `let context = this._context;
+  if (this._context.constructor.name === "FrameExecutionContext") {
+      const frame = this._context.frame;
+      if (frame) {
+          if (isolatedContext) context = await frame._utilityContext();
+          else if (!isolatedContext) context = await frame._mainContext();
+      }
+  }`,
+);
+
+// ----------------------------
+// server/dispatchers/frameDispatcher.ts
+// ----------------------------
+const frameDispatcherSourceFile = project.addSourceFileAtPath(
+  "packages/playwright-core/src/server/dispatchers/frameDispatcher.ts",
+);
+// ------- frameDispatcher Class -------
+const frameDispatcherClass = frameDispatcherSourceFile.getClass("FrameDispatcher");
+// -- evaluateExpression Method --
+const frameEvaluateExpressionMethod = frameDispatcherClass.getMethod("evaluateExpression");
+const frameEvaluateExpressionReturn = frameEvaluateExpressionMethod.getFirstDescendantByKind(SyntaxKind.ReturnStatement);
+const frameEvaluateExpressionCall = frameEvaluateExpressionReturn.getFirstDescendantByKind(SyntaxKind.CallExpression).getFirstDescendantByKind(SyntaxKind.CallExpression);
+// add isolatedContext Bool Param
+if (frameEvaluateExpressionCall && frameEvaluateExpressionCall.getExpression().getText().includes("this._frame.evaluateExpression")) {
+      // Add the new argument to the function call
+      // frameEvaluateExpressionCall.addArgument("params.isolatedContext");
+
+      // Get the second argument (which is an object: { isFunction: params.isFunction })
+      const secondArg = frameEvaluateExpressionCall.getArguments()[1];
+      if (secondArg && secondArg.getKind() === SyntaxKind.ObjectLiteralExpression) {
+            // Add the executionContext property
+            secondArg.addPropertyAssignment({
+              name: "world",
+              initializer: "params.isolatedContext ? 'utility': 'main'"
+            });
+      }
+}
+// -- evaluateExpressionHandle Method --
+const frameEvaluateExpressionHandleMethod = frameDispatcherClass.getMethod("evaluateExpressionHandle");
+const frameEvaluateExpressionHandleReturn = frameEvaluateExpressionHandleMethod.getFirstDescendantByKind(SyntaxKind.ReturnStatement);
+const frameEvaluateExpressionHandleCall = frameEvaluateExpressionHandleReturn.getFirstDescendantByKind(SyntaxKind.CallExpression).getFirstDescendantByKind(SyntaxKind.CallExpression);
+// add isolatedContext Bool Param
+if (frameEvaluateExpressionHandleCall && frameEvaluateExpressionHandleCall.getExpression().getText().includes("this._frame.evaluateExpression")) {
+      // Add the new argument to the function call
+      //frameEvaluateExpressionHandleCall.addArgument("params.isolatedContext");
+
+      // Get the second argument (which is an object: { isFunction: params.isFunction })
+      const secondArg = frameEvaluateExpressionHandleCall.getArguments()[1];
+      if (secondArg && secondArg.getKind() === SyntaxKind.ObjectLiteralExpression) {
+            // Add the executionContext property
+            secondArg.addPropertyAssignment({
+              name: "world",
+              initializer: "params.isolatedContext ? 'utility': 'main'"
+            });
+      }
+}
+
+// ----------------------------
+// server/dispatchers/jsHandleDispatcher.ts
+// ----------------------------
+const jsHandleDispatcherSourceFile = project.addSourceFileAtPath(
+  "packages/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts",
+);
+// ------- workerDispatcher Class -------
+const jsHandleDispatcherClass = jsHandleDispatcherSourceFile.getClass("JSHandleDispatcher");
+// -- evaluateExpression Method --
+const jsHandleDispatcherEvaluateExpressionMethod = jsHandleDispatcherClass.getMethod("evaluateExpression");
+const jsHandleDispatcherEvaluateExpressionReturn = jsHandleDispatcherEvaluateExpressionMethod.getFirstDescendantByKind(SyntaxKind.ReturnStatement);
+const jsHandleDispatcherEvaluateExpressionCall = jsHandleDispatcherEvaluateExpressionReturn.getFirstDescendantByKind(SyntaxKind.CallExpression).getFirstDescendantByKind(SyntaxKind.CallExpression);
+// add isolatedContext Bool Param
+if (jsHandleDispatcherEvaluateExpressionCall && jsHandleDispatcherEvaluateExpressionCall.getExpression().getText().includes("this._object.evaluateExpression")) {
+      // Add the new argument to the function call
+      jsHandleDispatcherEvaluateExpressionCall.addArgument("params.isolatedContext");
+}
+// -- evaluateExpressionHandle Method --
+const jsHandleDispatcherEvaluateExpressionHandleMethod = jsHandleDispatcherClass.getMethod("evaluateExpressionHandle");
+const jsHandleDispatcherEvaluateExpressionHandleCall = jsHandleDispatcherEvaluateExpressionHandleMethod.getFirstDescendantByKind(SyntaxKind.CallExpression);
+// add isolatedContext Bool Param
+if (jsHandleDispatcherEvaluateExpressionHandleCall && jsHandleDispatcherEvaluateExpressionHandleCall.getExpression().getText().includes("this._object.evaluateExpression")) {
+      // Add the new argument to the function call
+      jsHandleDispatcherEvaluateExpressionHandleCall.addArgument("params.isolatedContext");
+}
+
+// ----------------------------
+// server/dispatchers/pageDispatcher.ts
+// ----------------------------
+const pageDispatcherSourceFile = project.addSourceFileAtPath(
+  "packages/playwright-core/src/server/dispatchers/pageDispatcher.ts",
+);
+// ------- workerDispatcher Class -------
+const workerDispatcherClass = pageDispatcherSourceFile.getClass("WorkerDispatcher");
+// -- evaluateExpression Method --
+const workerDispatcherEvaluateExpressionMethod = workerDispatcherClass.getMethod("evaluateExpression");
+const workerDispatcherEvaluateExpressionReturn = workerDispatcherEvaluateExpressionMethod.getFirstDescendantByKind(SyntaxKind.ReturnStatement);
+const workerDispatcherEvaluateExpressionCall = workerDispatcherEvaluateExpressionReturn.getFirstDescendantByKind(SyntaxKind.CallExpression).getFirstDescendantByKind(SyntaxKind.CallExpression);
+// add isolatedContext Bool Param
+if (workerDispatcherEvaluateExpressionCall && workerDispatcherEvaluateExpressionCall.getExpression().getText().includes("this._object.evaluateExpression")) {
+      // Add the new argument to the function call
+      workerDispatcherEvaluateExpressionCall.addArgument("params.isolatedContext");
+}
+// -- evaluateExpressionHandle Method --
+const workerDispatcherEvaluateExpressionHandleMethod = workerDispatcherClass.getMethod("evaluateExpressionHandle");
+const workerDispatcherEvaluateExpressionHandleReturn = workerDispatcherEvaluateExpressionHandleMethod.getFirstDescendantByKind(SyntaxKind.ReturnStatement);
+const workerDispatcherEvaluateExpressionHandleCall = workerDispatcherEvaluateExpressionHandleReturn.getFirstDescendantByKind(SyntaxKind.CallExpression).getFirstDescendantByKind(SyntaxKind.CallExpression);
+// add isolatedContext Bool Param
+if (workerDispatcherEvaluateExpressionHandleCall && workerDispatcherEvaluateExpressionHandleCall.getExpression().getText().includes("this._object.evaluateExpression")) {
+      // Add the new argument to the function call
+      workerDispatcherEvaluateExpressionHandleCall.addArgument("params.isolatedContext");
+}
+
+// ----------------------------
+// protocol/validator.ts
+// ----------------------------
+const validatorSourceFile = project.addSourceFileAtPath(
+  "packages/playwright-core/src/protocol/validator.ts",
+);
+const assignments = validatorSourceFile.getDescendantsOfKind(SyntaxKind.BinaryExpression);
+const frameEvaluateParamsAssignment = assignments.find(assignment => {
+  const left = assignment.getLeft();
+    const right = assignment.getRight();
+  if (left.getText() !== "scheme.FrameEvaluateExpressionParams") {
+    return false;
+  }
+  return right.isKind(SyntaxKind.CallExpression) && right.getExpression().getText() === "tObject";
+});
+if (frameEvaluateParamsAssignment) {
+  const callExpression = frameEvaluateParamsAssignment.getRight().asKind(SyntaxKind.CallExpression);
+  if (callExpression) {
+    const objectArg = callExpression.getArguments()[0];
+    if (objectArg && objectArg.isKind(SyntaxKind.ObjectLiteralExpression)) {
+      objectArg.addPropertyAssignment({
+        name: "isolatedContext",
+        initializer: "tBoolean"
+      });
+    }
+  }
+}
+const jsHandleEvaluateExpressionParamsAssignment = assignments.find(assignment => {
+  const left = assignment.getLeft();
+    const right = assignment.getRight();
+  if (left.getText() !== "scheme.JSHandleEvaluateExpressionParams") {
+    return false;
+  }
+  return right.isKind(SyntaxKind.CallExpression) && right.getExpression().getText() === "tObject";
+});
+if (jsHandleEvaluateExpressionParamsAssignment) {
+  const callExpression = jsHandleEvaluateExpressionParamsAssignment.getRight().asKind(SyntaxKind.CallExpression);
+  if (callExpression) {
+    const objectArg = callExpression.getArguments()[0];
+    if (objectArg && objectArg.isKind(SyntaxKind.ObjectLiteralExpression)) {
+      objectArg.addPropertyAssignment({
+        name: "isolatedContext",
+        initializer: "tBoolean"
+      });
+    }
+  }
+}
+const workerEvaluateExpressionParamsAssignment = assignments.find(assignment => {
+  const left = assignment.getLeft();
+    const right = assignment.getRight();
+  if (left.getText() !== "scheme.WorkerEvaluateExpressionParams") {
+    return false;
+  }
+  return right.isKind(SyntaxKind.CallExpression) && right.getExpression().getText() === "tObject";
+});
+if (workerEvaluateExpressionParamsAssignment) {
+  const callExpression = workerEvaluateExpressionParamsAssignment.getRight().asKind(SyntaxKind.CallExpression);
+  if (callExpression) {
+    const objectArg = callExpression.getArguments()[0];
+    if (objectArg && objectArg.isKind(SyntaxKind.ObjectLiteralExpression)) {
+      objectArg.addPropertyAssignment({
+        name: "isolatedContext",
+        initializer: "tBoolean"
+      });
+    }
+  }
+}
+
+// ----------------------------
+// protocol/channels.d.ts
+// ----------------------------
+const channelsTypeFile = project.addSourceFileAtPath(
+  "packages/protocol/src/channels.d.ts",
+);
+const jsHandleEvaluateTypeAlias = channelsTypeFile.getTypeAlias("JSHandleEvaluateExpressionParams");
+if (jsHandleEvaluateTypeAlias) {
+    const typeLiteral = jsHandleEvaluateTypeAlias.getFirstChildByKind(SyntaxKind.TypeLiteral);
+    if (typeLiteral) {
+        typeLiteral.addProperty({
+            name: "isolatedContext",
+            type: "boolean",
+            hasQuestionToken: true,
+        });
+    }
+}
+const jsHandleEvaluateHandleTypeAlias = channelsTypeFile.getTypeAlias("JSHandleEvaluateHandleExpressionParams");
+if (jsHandleEvaluateHandleTypeAlias) {
+    const typeLiteral = jsHandleEvaluateHandleTypeAlias.getFirstChildByKind(SyntaxKind.TypeLiteral);
+    if (typeLiteral) {
+        typeLiteral.addProperty({
+            name: "isolatedContext",
+            type: "boolean",
+            hasQuestionToken: true,
+        });
+    }
+}
+const frameEvaluateTypeAlias = channelsTypeFile.getTypeAlias("FrameEvaluateExpressionParams");
+if (frameEvaluateTypeAlias) {
+    const typeLiteral = frameEvaluateTypeAlias.getFirstChildByKind(SyntaxKind.TypeLiteral);
+    if (typeLiteral) {
+        typeLiteral.addProperty({
+            name: "isolatedContext",
+            type: "boolean",
+            hasQuestionToken: true,
+        });
+    }
+}
+const frameEvaluateHandleTypeAlias = channelsTypeFile.getTypeAlias("FrameEvaluateExpressionHandleParams");
+if (frameEvaluateHandleTypeAlias) {
+    const typeLiteral = frameEvaluateHandleTypeAlias.getFirstChildByKind(SyntaxKind.TypeLiteral);
+    if (typeLiteral) {
+        typeLiteral.addProperty({
+            name: "isolatedContext",
+            type: "boolean",
+            hasQuestionToken: true,
+        });
+    }
+}
+const workerEvaluateTypeAlias = channelsTypeFile.getTypeAlias("WorkerEvaluateExpressionParams");
+if (workerEvaluateTypeAlias) {
+    const typeLiteral = workerEvaluateTypeAlias.getFirstChildByKind(SyntaxKind.TypeLiteral);
+    if (typeLiteral) {
+        typeLiteral.addProperty({
+            name: "isolatedContext",
+            type: "boolean",
+            hasQuestionToken: true,
+        });
+    }
+}
+const workerEvaluateHandleTypeAlias = channelsTypeFile.getTypeAlias("WorkerEvaluateExpressionHandleParams");
+if (workerEvaluateHandleTypeAlias) {
+    const typeLiteral = workerEvaluateHandleTypeAlias.getFirstChildByKind(SyntaxKind.TypeLiteral);
+    if (typeLiteral) {
+        typeLiteral.addProperty({
+            name: "isolatedContext",
+            type: "boolean",
+            hasQuestionToken: true,
+        });
+    }
+}
 
 // Save the changes without reformatting
 project.saveSync();

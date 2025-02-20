@@ -113,7 +113,7 @@ Patchright InitScripts can be detected by Timing Attacks. However, no antibot cu
 ---
 
 ### TODO
-- [ ] Implement Option to choose Execution Context (Main/Isolated).
+- [x] Implement Option to choose Execution Context (Main/Isolated).
 - [ ] Fix Fixable Bugs.
 - [ ] Implement .patch Updater to easily show Patchright's patches.
 - [ ] Setup Automated Testing on new Release.
