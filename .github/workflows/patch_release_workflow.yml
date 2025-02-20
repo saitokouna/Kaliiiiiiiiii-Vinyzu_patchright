@@ -1,0 +1,64 @@
+name: Trigger on Commit and Manual Request
+
+on:
+  push:
+    branches:
+      - "main"
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  run_action:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node v18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+          registry-url: 'https://registry.npmjs.org'
+      - name: Install TS-Morph
+        run: npm install
+
+      - name: Get Commit Author
+        id: get_author
+        run: |
+          AUTHOR=$(git log -1 --pretty=format:'%an')
+          echo "Commit author: $AUTHOR"
+          echo "AUTHOR=$AUTHOR" >> $GITHUB_ENV
+
+      - name: Get Original Commit Message
+        id: get_commit_message
+        run: |
+          COMMIT_MESSAGE=$(git log -1 --pretty=format:'%s')
+          echo "COMMIT_MESSAGE=$COMMIT_MESSAGE" >> $GITHUB_ENV
+
+      - name: Skip if Commit is from GitHub Actions
+        if: env.AUTHOR == 'github-actions'
+        run: echo "Skipping action as the commit is from github-actions" && exit 0
+
+      - name: Install Playwright Driver
+        run: |
+          git clone https://github.com/microsoft/playwright
+          cd playwright
+          npm ci
+
+      - name: Copy Driver Directory to prepare for Patch-Comparison
+        run: |
+          cp -r playwright playwright_not_patched
+
+      - name: Patch Playwright Driver
+        run: |
+          cd playwright
+          node "../patchright_driver_patch.js"
+
+      - name: Compare Directories and Create Patch File
+        run: |
+          diff -ruN playwright_not_patched playwright > patchright_patches.patch || true
+
+      - name: Commit and Push Patch File
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add patchright_patches.patch
+          git commit -m "[Patch-Comparison] Automatic Commit: ${{ env.COMMIT_MESSAGE }}"
+          git push
