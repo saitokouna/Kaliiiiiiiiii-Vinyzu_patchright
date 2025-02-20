@@ -66,14 +66,20 @@ jobs:
           cd playwright
           node "../patchright_driver_patch.js"
 
+      - name: Rename Patched Directory
+        run: |
+          mv playwright patchright
+          mv playwright_not_patched playwright
+
       - name: Compare Directories and Create Patch File
         run: |
-          diff -ruN playwright_not_patched playwright > patchright_patches.patch || true
+          echo "# NOTE: This patch file is generated automatically and is not used, it is only for documentation. The driver is actually patched using [patchright_driver_patch](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/blob/main/patchright_driver_patch.js), see [the workflow](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/blob/main/.github/workflows/patchright_workflow.yml)" > playwright_driver.patch
+          diff -ruN playwright patchright > patchright.patch || true
 
       - name: Commit and Push Patch File
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "[Patch-Comparison] Automatic Commit: ${{ env.COMMIT_MESSAGE }}"
           branch: "main"
-          file_pattern: "patchright_patches.patch"
+          file_pattern: "patchright.patch"
           skip_fetch: true
