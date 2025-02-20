@@ -72,9 +72,9 @@ jobs:
           diff -ruN playwright_not_patched playwright > patchright_patches.patch || true
 
       - name: Commit and Push Patch File
-        run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add patchright_patches.patch
-          git commit -m "[Patch-Comparison] Automatic Commit: ${{ env.COMMIT_MESSAGE }}"
-          git push
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "[Patch-Comparison] Automatic Commit: ${{ env.COMMIT_MESSAGE }}"
+          branch: "main"
+          file_pattern: "patchright_patches.patch"
+          skip_fetch: true
