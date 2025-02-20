@@ -74,7 +74,7 @@ jobs:
       - name: Compare Directories and Create Patch File
         run: |
           echo "# NOTE: This patch file is generated automatically and is not used, it is only for documentation. The driver is actually patched using [patchright_driver_patch](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/blob/main/patchright_driver_patch.js), see [the workflow](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright/blob/main/.github/workflows/patchright_workflow.yml)" > patchright.patch
-          diff -ruN playwright patchright > patchright.patch || true
+          diff -ruN playwright patchright >> patchright.patch || true
 
       - name: Commit and Push Patch File
         uses: stefanzweifel/git-auto-commit-action@v5
