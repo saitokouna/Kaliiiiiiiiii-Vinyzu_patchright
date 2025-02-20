@@ -1,0 +1,2195 @@
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/protocol/validator.ts playwright/node_modules/playwright-core/src/protocol/validator.ts
+--- playwright_not_patched/node_modules/playwright-core/src/protocol/validator.ts	2025-02-20 16:47:20.801538887 +0000
++++ playwright/node_modules/playwright-core/src/protocol/validator.ts	2025-02-20 16:47:27.467576570 +0000
+@@ -1545,6 +1545,7 @@
+   expression: tString,
+   isFunction: tOptional(tBoolean),
+   arg: tType('SerializedArgument'),
++  isolatedContext: tBoolean
+ });
+ scheme.FrameEvaluateExpressionResult = tObject({
+   value: tType('SerializedValue'),
+@@ -1830,6 +1831,7 @@
+   expression: tString,
+   isFunction: tOptional(tBoolean),
+   arg: tType('SerializedArgument'),
++  isolatedContext: tBoolean
+ });
+ scheme.WorkerEvaluateExpressionResult = tObject({
+   value: tType('SerializedValue'),
+@@ -1857,6 +1859,7 @@
+   expression: tString,
+   isFunction: tOptional(tBoolean),
+   arg: tType('SerializedArgument'),
++  isolatedContext: tBoolean
+ });
+ scheme.ElementHandleEvaluateExpressionParams = tType('JSHandleEvaluateExpressionParams');
+ scheme.JSHandleEvaluateExpressionResult = tObject({
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/bidi/bidiPage.ts playwright/node_modules/playwright-core/src/server/bidi/bidiPage.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/bidi/bidiPage.ts	2025-02-20 16:47:20.803538898 +0000
++++ playwright/node_modules/playwright-core/src/server/bidi/bidiPage.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -378,7 +378,7 @@
+       this._initScriptIds.push(script);
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     const promises = this._initScriptIds.map(script => this._session.send('script.removePreloadScript', { script }));
+     this._initScriptIds = [];
+     await Promise.all(promises);
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/browserContext.ts playwright/node_modules/playwright-core/src/server/browserContext.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/browserContext.ts	2025-02-20 16:47:20.803538898 +0000
++++ playwright/node_modules/playwright-core/src/server/browserContext.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -149,7 +149,7 @@
+     if (debugMode() === 'console')
+       await this.extendInjectedScript(consoleApiSource.source);
+     if (this._options.serviceWorkers === 'block')
+-      await this.addInitScript(`\nif (navigator.serviceWorker) navigator.serviceWorker.register = async () => { console.warn('Service Worker registration blocked by Playwright'); };\n`);
++      await this.addInitScript(`navigator.serviceWorker.register = async () => { };`);
+ 
+     if (this._options.permissions)
+       await this.grantPermissions(this._options.permissions);
+@@ -332,16 +332,15 @@
+     }
+     const binding = new PageBinding(name, playwrightBinding, needsHandle);
+     this._pageBindings.set(name, binding);
+-    await this.doAddInitScript(binding.initScript);
+-    const frames = this.pages().map(page => page.frames()).flat();
+-    await Promise.all(frames.map(frame => frame.evaluateExpression(binding.initScript.source).catch(e => {})));
++    await this.doExposeBinding(binding);
+   }
+ 
+   async _removeExposedBindings() {
+-    for (const [key, binding] of this._pageBindings) {
+-      if (!binding.internal)
++    for (const key of this._pageBindings.keys()) {
++      if (!key.startsWith('__pw'))
+         this._pageBindings.delete(key);
+     }
++    await this.doRemoveExposedBindings();
+   }
+ 
+   async grantPermissions(permissions: string[], origin?: string) {
+@@ -430,8 +429,8 @@
+   }
+ 
+   async _removeInitScripts(): Promise<void> {
+-    this.initScripts = this.initScripts.filter(script => script.internal);
+-    await this.doRemoveNonInternalInitScripts();
++    this.initScripts.splice(0, this.initScripts.length);
++    await this.doRemoveInitScripts();
+   }
+ 
+   async setRequestInterceptor(handler: network.RouteHandler | undefined): Promise<void> {
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/chromium/chromiumSwitches.ts playwright/node_modules/playwright-core/src/server/chromium/chromiumSwitches.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/chromium/chromiumSwitches.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/node_modules/playwright-core/src/server/chromium/chromiumSwitches.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -21,16 +21,10 @@
+   '--disable-field-trial-config', // https://source.chromium.org/chromium/chromium/src/+/main:testing/variations/README.md
+   '--disable-background-networking',
+   '--disable-background-timer-throttling',
+-  '--disable-backgrounding-occluded-windows',
+-  '--disable-back-forward-cache', // Avoids surprises like main request not being intercepted during page.goBack().
+-  '--disable-breakpad',
+-  '--disable-client-side-phishing-detection',
+-  '--disable-component-extensions-with-background-pages',
+-  '--disable-component-update', // Avoids unneeded network activity after startup.
++  '--disable-backgrounding-occluded-windows', // Avoids surprises like main request not being intercepted during page.goBack().
++  '--disable-breakpad', // Avoids unneeded network activity after startup.
+   '--no-default-browser-check',
+-  '--disable-default-apps',
+   '--disable-dev-shm-usage',
+-  '--disable-extensions',
+   // AvoidUnnecessaryBeforeUnloadCheckSync - https://github.com/microsoft/playwright/issues/14047
+   // Translate - https://github.com/microsoft/playwright/issues/16126
+   // HttpsUpgrades - https://github.com/microsoft/playwright/pull/27605
+@@ -41,16 +35,11 @@
+   //   making our navigation auto-wait after click not working. Can be removed once we deperecate noWaitAfter.
+   //   See https://github.com/microsoft/playwright/pull/34372.
+   '--disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,DeferRendererTasksAfterInput',
+-  '--allow-pre-commit-input',
+   '--disable-hang-monitor',
+-  '--disable-ipc-flooding-protection',
+-  '--disable-popup-blocking',
+   '--disable-prompt-on-repost',
+   '--disable-renderer-backgrounding',
+   '--force-color-profile=srgb',
+-  '--metrics-recording-only',
+   '--no-first-run',
+-  '--enable-automation',
+   '--password-store=basic',
+   '--use-mock-keychain',
+   // See https://chromium-review.googlesource.com/c/chromium/src/+/2436773
+@@ -58,6 +47,5 @@
+   '--export-tagged-pdf',
+   // https://chromium-review.googlesource.com/c/chromium/src/+/4853540
+   '--disable-search-engine-choice-screen',
+-  // https://issues.chromium.org/41491762
+-  '--unsafely-disable-devtools-self-xss-warnings',
++  '--disable-blink-features=AutomationControlled'
+ ];
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/chromium/crBrowser.ts playwright/node_modules/playwright-core/src/server/chromium/crBrowser.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/chromium/crBrowser.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/node_modules/playwright-core/src/server/chromium/crBrowser.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -494,11 +494,6 @@
+       await (page._delegate as CRPage).addInitScript(initScript);
+   }
+ 
+-  async doRemoveNonInternalInitScripts() {
+-    for (const page of this.pages())
+-      await (page._delegate as CRPage).removeNonInternalInitScripts();
+-  }
+-
+   async doUpdateRequestInterception(): Promise<void> {
+     for (const page of this.pages())
+       await (page._delegate as CRPage).updateRequestInterception();
+@@ -598,4 +593,16 @@
+     const rootSession = await this._browser._clientRootSession();
+     return rootSession.attachToTarget(targetId);
+   }
++
++  async doRemoveInitScripts() {
++    for (const page of this.pages()) await (page._delegate as CRPage).removeInitScripts();
++  }
++
++  async doExposeBinding(binding: PageBinding) {
++    for (const page of this.pages()) await (page._delegate as CRPage).exposeBinding(binding);
++  }
++
++  async doRemoveExposedBindings() {
++    for (const page of this.pages()) await (page._delegate as CRPage).removeExposedBindings();
++  }
+ }
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/chromium/crDevTools.ts playwright/node_modules/playwright-core/src/server/chromium/crDevTools.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/chromium/crDevTools.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/node_modules/playwright-core/src/server/chromium/crDevTools.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -67,7 +67,6 @@
+       }).catch(e => null);
+     });
+     Promise.all([
+-      session.send('Runtime.enable'),
+       session.send('Runtime.addBinding', { name: kBindingName }),
+       session.send('Page.enable'),
+       session.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/chromium/crNetworkManager.ts playwright/node_modules/playwright-core/src/server/chromium/crNetworkManager.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/chromium/crNetworkManager.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/node_modules/playwright-core/src/server/chromium/crNetworkManager.ts	2025-02-20 16:47:27.470576587 +0000
+@@ -1,3 +1,5 @@
++// undetected-undetected_playwright-patch - custom imports
++import crypto from 'crypto';
+ /**
+  * Copyright 2017 Google Inc. All rights reserved.
+  * Modifications copyright (c) Microsoft Corporation.
+@@ -156,7 +158,7 @@
+     const enabled = this._protocolRequestInterceptionEnabled;
+     if (initial && !enabled)
+       return;
+-    const cachePromise = info.session.send('Network.setCacheDisabled', { cacheDisabled: enabled });
++    const cachePromise = info.session.send('Network.setCacheDisabled', { cacheDisabled: false });
+     let fetchPromise = Promise.resolve<any>(undefined);
+     if (!info.workerFrame) {
+       if (enabled)
+@@ -342,7 +344,7 @@
+         headersOverride = redirectedFrom?._originalRequestRoute?._alreadyContinuedParams?.headers;
+         requestPausedSessionInfo!.session._sendMayFail('Fetch.continueRequest', { requestId: requestPausedEvent.requestId, headers: headersOverride });
+       } else {
+-        route = new RouteImpl(requestPausedSessionInfo!.session, requestPausedEvent.requestId);
++        route = new RouteImpl(requestPausedSessionInfo!.session, requestPausedEvent.requestId, this._page);
+       }
+     }
+     const isNavigationRequest = requestWillBeSentEvent.requestId === requestWillBeSentEvent.loaderId && requestWillBeSentEvent.type === 'Document';
+@@ -606,9 +608,11 @@
+   _alreadyContinuedParams: Protocol.Fetch.continueRequestParameters | undefined;
+   _fulfilled: boolean = false;
+ 
+-  constructor(session: CRSession, interceptionId: string) {
++  constructor(session: CRSession, interceptionId: string, page: Page) {
++    this._page = void 0;
+     this._session = session;
+     this._interceptionId = interceptionId;
++    this._page = page;
+   }
+ 
+   async continue(overrides: types.NormalizedContinueOverrides): Promise<void> {
+@@ -625,6 +629,42 @@
+   }
+ 
+   async fulfill(response: types.NormalizedFulfillResponse) {
++    const isTextHtml = response.headers.some(header => header.name === 'content-type' && header.value.includes('text/html'));
++      var allInjections = [...this._page._delegate._mainFrameSession._evaluateOnNewDocumentScripts];
++          for (const binding of this._page._delegate._browserContext._pageBindings.values()) {
++            if (!allInjections.includes(binding)) allInjections.push(binding);
++          }
++      if (isTextHtml && allInjections.length) {
++        // I Chatted so hard for this Code
++        let scriptNonce = crypto.randomBytes(22).toString('hex');
++        for (let i = 0; i < response.headers.length; i++) {
++          if (response.headers[i].name === 'content-security-policy' || response.headers[i].name === 'content-security-policy-report-only') {
++            // Search for an existing script-src nonce that we can hijack
++            let cspValue = response.headers[i].value;
++            const nonceRegex = /script-src[^;]*'nonce-([\w-]+)'/;
++            const nonceMatch = cspValue.match(nonceRegex);
++            if (nonceMatch) {
++              scriptNonce = nonceMatch[1];
++            } else {
++              // Add the new nonce value to the script-src directive
++              const scriptSrcRegex = /(script-src[^;]*)(;|$)/;
++              const newCspValue = cspValue.replace(scriptSrcRegex, `$1 'nonce-${scriptNonce}'$2`);
++              response.headers[i].value = newCspValue;
++            }
++            break;
++          }
++        }
++        let injectionHTML = "";
++        allInjections.forEach((script) => {
++          injectionHTML += `<script class="${this._page._delegate.initScriptTag}" nonce="${scriptNonce}" type="text/javascript">${script.source}</script>`;
++        });
++        if (response.isBase64) {
++          response.isBase64 = false;
++          response.body = injectionHTML + Buffer.from(response.body, 'base64').toString('utf-8');
++        } else {
++          response.body = injectionHTML + response.body;
++        }
++      }
+     this._fulfilled = true;
+     const body = response.isBase64 ? response.body : Buffer.from(response.body).toString('base64');
+ 
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/chromium/crPage.ts playwright/node_modules/playwright-core/src/server/chromium/crPage.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/chromium/crPage.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/node_modules/playwright-core/src/server/chromium/crPage.ts	2025-02-20 16:47:27.470576587 +0000
+@@ -1,3 +1,5 @@
++// undetected-undetected_playwright-patch - custom imports
++import crypto from 'crypto';
+ /**
+  * Copyright 2017 Google Inc. All rights reserved.
+  * Modifications copyright (c) Microsoft Corporation.
+@@ -101,7 +103,8 @@
+     this.updateOffline();
+     this.updateExtraHTTPHeaders();
+     this.updateHttpCredentials();
+-    this.updateRequestInterception();
++    this._networkManager.setRequestInterception(true);
++    this.initScriptTag = "injected-playwright-init-script-" + crypto.randomBytes(20).toString('hex');
+     this._mainFrameSession = new FrameSession(this, client, targetId, null);
+     this._sessions.set(targetId, this._mainFrameSession);
+     if (opener && !browserContext._options.noDefaultViewport) {
+@@ -231,10 +234,11 @@
+   }
+ 
+   async addInitScript(initScript: InitScript, world: types.World = 'main'): Promise<void> {
++    this._page.initScripts.push(initScript);
+     await this._forAllFrameSessions(frame => frame._evaluateOnNewDocument(initScript, world));
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     await this._forAllFrameSessions(frame => frame._removeEvaluatesOnNewDocument());
+   }
+ 
+@@ -369,6 +373,15 @@
+   shouldToggleStyleSheetToSyncAnimations(): boolean {
+     return false;
+   }
++
++  async exposeBinding(binding) {
++    await this._forAllFrameSessions(frame => frame._initBinding(binding));
++    await Promise.all(this._page.frames().map(frame => frame.evaluateExpression(binding.source).catch(e => {})));
++  }
++
++  async removeExposedBindings() {
++    await this._forAllFrameSessions(frame => frame._removeExposedBindings());
++  }
+ }
+ 
+ class FrameSession {
+@@ -483,19 +496,6 @@
+           this._handleFrameTree(frameTree);
+           this._addRendererListeners();
+         }
+-
+-        const localFrames = this._isMainFrame() ? this._page.frames() : [this._page._frameManager.frame(this._targetId)!];
+-        for (const frame of localFrames) {
+-          // Note: frames might be removed before we send these.
+-          this._client._sendMayFail('Page.createIsolatedWorld', {
+-            frameId: frame._id,
+-            grantUniveralAccess: true,
+-            worldName: UTILITY_WORLD_NAME,
+-          });
+-          for (const initScript of this._crPage._page.allInitScripts())
+-            frame.evaluateExpression(initScript.source).catch(e => {});
+-        }
+-
+         const isInitialEmptyPage = this._isMainFrame() && this._page.mainFrame().url() === ':';
+         if (isInitialEmptyPage) {
+           // Ignore lifecycle events, worlds and bindings for the initial empty page. It is never the final page
+@@ -505,14 +505,20 @@
+             this._eventListeners.push(eventsHelper.addEventListener(this._client, 'Page.lifecycleEvent', event => this._onLifecycleEvent(event)));
+           });
+         } else {
++          const localFrames = this._isMainFrame() ? this._page.frames() : [this._page._frameManager.frame(this._targetId)!];
++          for (const frame of localFrames) {
++            this._page._frameManager.frame(frame._id)._context("utility");
++            for (const binding of this._crPage._browserContext._pageBindings.values())
++              frame.evaluateExpression(binding.source).catch(e => {});
++            for (const source of this._crPage._browserContext.initScripts)
++              frame.evaluateExpression(source).catch(e => {});
++          }
+           this._firstNonInitialNavigationCommittedFulfill();
+           this._eventListeners.push(eventsHelper.addEventListener(this._client, 'Page.lifecycleEvent', event => this._onLifecycleEvent(event)));
+         }
+       }),
+       this._client.send('Log.enable', {}),
+       lifecycleEventsEnabled = this._client.send('Page.setLifecycleEventsEnabled', { enabled: true }),
+-      this._client.send('Runtime.enable', {}),
+-      this._client.send('Runtime.addBinding', { name: PageBinding.kPlaywrightBinding }),
+       this._client.send('Page.addScriptToEvaluateOnNewDocument', {
+         source: '',
+         worldName: UTILITY_WORLD_NAME,
+@@ -545,14 +551,16 @@
+       promises.push(this._updateGeolocation(true));
+       promises.push(this._updateEmulateMedia());
+       promises.push(this._updateFileChooserInterception(true));
+-      for (const initScript of this._crPage._page.allInitScripts())
+-        promises.push(this._evaluateOnNewDocument(initScript, 'main'));
++      for (const binding of this._crPage._page.allBindings()) promises.push(this._initBinding(binding));
++      for (const initScript of this._crPage._browserContext.initScripts) promises.push(this._evaluateOnNewDocument(initScript, 'main'));
++      for (const initScript of this._crPage._page.initScripts) promises.push(this._evaluateOnNewDocument(initScript, 'main'));
+       if (screencastOptions)
+         promises.push(this._startVideoRecording(screencastOptions));
+     }
+-    promises.push(this._client.send('Runtime.runIfWaitingForDebugger'));
++    if (!(this._crPage._page._pageBindings.size || this._crPage._browserContext._pageBindings.size)) promises.push(this._client.send('Runtime.runIfWaitingForDebugger'));
+     promises.push(this._firstNonInitialNavigationCommittedPromise);
+     await Promise.all(promises);
++    if (this._crPage._page._pageBindings.size || this._crPage._browserContext._pageBindings.size) await this._client.send('Runtime.runIfWaitingForDebugger');
+   }
+ 
+   dispose() {
+@@ -569,18 +577,30 @@
+ 
+   async _navigate(frame: frames.Frame, url: string, referrer: string | undefined): Promise<frames.GotoResult> {
+     const response = await this._client.send('Page.navigate', { url, referrer, frameId: frame._id, referrerPolicy: 'unsafeUrl' });
++    this._client._sendMayFail('Page.waitForDebugger');
+     if (response.errorText)
+       throw new frames.NavigationAbortedError(response.loaderId, `${response.errorText} at ${url}`);
+     return { newDocumentId: response.loaderId };
+   }
+ 
+-  _onLifecycleEvent(event: Protocol.Page.lifecycleEventPayload) {
++  async _onLifecycleEvent(event: Protocol.Page.lifecycleEventPayload) {
+     if (this._eventBelongsToStaleFrame(event.frameId))
+       return;
+     if (event.name === 'load')
+       this._page._frameManager.frameLifecycleEvent(event.frameId, 'load');
+     else if (event.name === 'DOMContentLoaded')
+       this._page._frameManager.frameLifecycleEvent(event.frameId, 'domcontentloaded');
++    var document = await this._client._sendMayFail("DOM.getDocument");
++      if (!document) return
++      var query = await this._client._sendMayFail("DOM.querySelectorAll", {
++        nodeId: document.root.nodeId,
++        selector: "[class=" + this._crPage.initScriptTag + "]"
++      });
++      if (!query) return
++      for (const nodeId of query.nodeIds) await this._client._sendMayFail("DOM.removeNode", { nodeId: nodeId });
++      await this._client._sendMayFail('Runtime.runIfWaitingForDebugger');
++      // ensuring execution context
++      try { await this._page._frameManager.frame(this._targetId)._context("utility") } catch { };
+   }
+ 
+   _handleFrameTree(frameTree: Protocol.Page.FrameTree) {
+@@ -627,12 +647,23 @@
+     this._page._frameManager.frameAttached(frameId, parentFrameId);
+   }
+ 
+-  _onFrameNavigated(framePayload: Protocol.Page.Frame, initial: boolean) {
++  async _onFrameNavigated(framePayload: Protocol.Page.Frame, initial: boolean) {
+     if (this._eventBelongsToStaleFrame(framePayload.id))
+       return;
+     this._page._frameManager.frameCommittedNewDocumentNavigation(framePayload.id, framePayload.url + (framePayload.urlFragment || ''), framePayload.name || '', framePayload.loaderId, initial);
+     if (!initial)
+       this._firstNonInitialNavigationCommittedFulfill();
++    var document = await this._client._sendMayFail("DOM.getDocument");
++      if (!document) return
++      var query = await this._client._sendMayFail("DOM.querySelectorAll", {
++        nodeId: document.root.nodeId,
++        selector: "[class=" + this._crPage.initScriptTag + "]"
++      });
++      if (!query) return
++      for (const nodeId of query.nodeIds) await this._client._sendMayFail("DOM.removeNode", { nodeId: nodeId });
++      await this._client._sendMayFail('Runtime.runIfWaitingForDebugger');
++      // ensuring execution context
++      try { await this._page._frameManager.frame(this._targetId)._context("utility") } catch { };
+   }
+ 
+   _onFrameRequestedNavigation(payload: Protocol.Page.frameRequestedNavigationPayload) {
+@@ -669,20 +700,25 @@
+   }
+ 
+   _onExecutionContextCreated(contextPayload: Protocol.Runtime.ExecutionContextDescription) {
++    for (const name of this._exposedBindingNames) this._client._sendMayFail('Runtime.addBinding', { name: name, executionContextId: contextPayload.id });
+     const frame = contextPayload.auxData ? this._page._frameManager.frame(contextPayload.auxData.frameId) : null;
++    if (contextPayload.auxData.type == "worker") throw new Error("ExecutionContext is worker");
+     if (!frame || this._eventBelongsToStaleFrame(frame._id))
+       return;
+     const delegate = new CRExecutionContext(this._client, contextPayload);
+-    let worldName: types.World|null = null;
+-    if (contextPayload.auxData && !!contextPayload.auxData.isDefault)
+-      worldName = 'main';
+-    else if (contextPayload.name === UTILITY_WORLD_NAME)
+-      worldName = 'utility';
++    let worldName = contextPayload.name;
+     const context = new dom.FrameExecutionContext(delegate, frame, worldName);
+     (context as any)[contextDelegateSymbol] = delegate;
+     if (worldName)
+       frame._contextCreated(worldName, context);
+     this._contextIdToContext.set(contextPayload.id, context);
++    for (const source of this._exposedBindingScripts) {
++      this._client._sendMayFail("Runtime.evaluate", {
++        expression: source,
++        contextId: contextPayload.id,
++        awaitPromise: true,
++      })
++    }
+   }
+ 
+   _onExecutionContextDestroyed(executionContextId: number) {
+@@ -698,7 +734,7 @@
+       this._onExecutionContextDestroyed(contextId);
+   }
+ 
+-  _onAttachedToTarget(event: Protocol.Target.attachedToTargetPayload) {
++  async _onAttachedToTarget(event: Protocol.Target.attachedToTargetPayload) {
+     const session = this._client.createChildSession(event.sessionId);
+ 
+     if (event.targetInfo.type === 'iframe') {
+@@ -730,8 +766,17 @@
+     session.once('Runtime.executionContextCreated', async event => {
+       worker._createExecutionContext(new CRExecutionContext(session, event.context));
+     });
++    var globalThis = await session._sendMayFail('Runtime.evaluate', {
++      expression: "globalThis",
++      serializationOptions: { serialization: "idOnly" }
++
++    });
++    if (globalThis && globalThis.result) {
++      var globalThisObjId = globalThis.result.objectId;
++      var executionContextId = parseInt(globalThisObjId.split('.')[1], 10);
++      worker._createExecutionContext(new CRExecutionContext(session, { id: executionContextId }));
++    }
+     // This might fail if the target is closed before we initialize.
+-    session._sendMayFail('Runtime.enable');
+     // TODO: attribute workers to the right frame.
+     this._crPage._networkManager.addSession(session, this._page._frameManager.frame(this._targetId) ?? undefined).catch(() => {});
+     session._sendMayFail('Runtime.runIfWaitingForDebugger');
+@@ -810,8 +855,8 @@
+     const pageOrError = await this._crPage._page.waitForInitializedOrError();
+     if (!(pageOrError instanceof Error)) {
+       const context = this._contextIdToContext.get(event.executionContextId);
+-      if (context)
+-        await this._page._onBindingCalled(event.payload, context);
++      if (context) await this._page._onBindingCalled(event.payload, context);
++      else await this._page._onBindingCalled(event.payload, (await this._page.mainFrame()._mainContext())) // This might be a bit sketchy but it works for now
+     }
+   }
+ 
+@@ -1057,16 +1102,11 @@
+   }
+ 
+   async _evaluateOnNewDocument(initScript: InitScript, world: types.World): Promise<void> {
+-    const worldName = world === 'utility' ? UTILITY_WORLD_NAME : undefined;
+-    const { identifier } = await this._client.send('Page.addScriptToEvaluateOnNewDocument', { source: initScript.source, worldName });
+-    if (!initScript.internal)
+-      this._evaluateOnNewDocumentIdentifiers.push(identifier);
++    this._evaluateOnNewDocumentScripts.push(initScript)
+   }
+ 
+   async _removeEvaluatesOnNewDocument(): Promise<void> {
+-    const identifiers = this._evaluateOnNewDocumentIdentifiers;
+-    this._evaluateOnNewDocumentIdentifiers = [];
+-    await Promise.all(identifiers.map(identifier => this._client.send('Page.removeScriptToEvaluateOnNewDocument', { identifier })));
++    this._evaluateOnNewDocumentScripts = [];
+   }
+ 
+   async _getContentFrame(handle: dom.ElementHandle): Promise<frames.Frame | null> {
+@@ -1167,12 +1207,53 @@
+   async _adoptBackendNodeId(backendNodeId: Protocol.DOM.BackendNodeId, to: dom.FrameExecutionContext): Promise<dom.ElementHandle> {
+     const result = await this._client._sendMayFail('DOM.resolveNode', {
+       backendNodeId,
+-      executionContextId: ((to as any)[contextDelegateSymbol] as CRExecutionContext)._contextId,
++      executionContextId: to._delegate._contextId,
+     });
+     if (!result || result.object.subtype === 'null')
+       throw new Error(dom.kUnableToAdoptErrorMessage);
+     return to.createHandle(result.object).asElement()!;
+   }
++
++  _exposedBindingNames: string[] = [];
++  _evaluateOnNewDocumentScripts: string[] = [];
++  _parsedExecutionContextIds: number[] = [];
++  _exposedBindingScripts: string[] = [];
++
++  async _initBinding(binding = PageBinding) {
++    var result = await this._client._sendMayFail('Page.createIsolatedWorld', {
++      frameId: this._targetId, grantUniveralAccess: true, worldName: "utility"
++    });
++    if (!result) return
++    var isolatedContextId = result.executionContextId
++
++    var globalThis = await this._client._sendMayFail('Runtime.evaluate', {
++      expression: "globalThis",
++      serializationOptions: { serialization: "idOnly" }
++    });
++    if (!globalThis) return
++    var globalThisObjId = globalThis["result"]['objectId']
++    var mainContextId = parseInt(globalThisObjId.split('.')[1], 10);
++
++    await Promise.all([
++      this._client._sendMayFail('Runtime.addBinding', { name: binding.name }),
++      this._client._sendMayFail('Runtime.addBinding', { name: binding.name, executionContextId: mainContextId }),
++      this._client._sendMayFail('Runtime.addBinding', { name: binding.name, executionContextId: isolatedContextId }),
++      // this._client._sendMayFail("Runtime.evaluate", { expression: binding.source, contextId: mainContextId, awaitPromise: true })
++    ]);
++    this._exposedBindingNames.push(binding.name);
++    this._exposedBindingScripts.push(binding.source);
++    await this._crPage.addInitScript(binding.source);
++    //this._client._sendMayFail('Runtime.runIfWaitingForDebugger')
++  }
++
++  async _removeExposedBindings() {
++    const toRetain: string[] = [];
++    const toRemove: string[] = [];
++    for (const name of this._exposedBindingNames)
++      (name.startsWith('__pw_') ? toRetain : toRemove).push(name);
++    this._exposedBindingNames = toRetain;
++    await Promise.all(toRemove.map(name => this._client.send('Runtime.removeBinding', { name })));
++  }
+ }
+ 
+ async function emulateLocale(session: CRSession, locale: string) {
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/chromium/crServiceWorker.ts playwright/node_modules/playwright-core/src/server/chromium/crServiceWorker.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/chromium/crServiceWorker.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/node_modules/playwright-core/src/server/chromium/crServiceWorker.ts	2025-02-20 16:47:27.470576587 +0000
+@@ -44,8 +44,6 @@
+       this.updateOffline();
+       this._networkManager.addSession(session, undefined, true /* isMain */).catch(() => {});
+     }
+-
+-    session.send('Runtime.enable', {}).catch(e => { });
+     session.send('Runtime.runIfWaitingForDebugger').catch(e => { });
+     session.on('Inspector.targetReloadedAfterCrash', () => {
+       // Resume service worker after restart.
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/clock.ts playwright/node_modules/playwright-core/src/server/clock.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/clock.ts	2025-02-20 16:47:20.805538909 +0000
++++ playwright/node_modules/playwright-core/src/server/clock.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -92,6 +92,14 @@
+   }
+ 
+   private async _evaluateInFrames(script: string) {
++    // Dont ask me why this works
++    await Promise.all(this._browserContext.pages().map(async page => {
++      await Promise.all(page.frames().map(async frame => {
++        try {
++          await frame.evaluateExpression("");
++        } catch (e) {}
++      }));
++    }));
+     await this._browserContext.safeNonStallingEvaluateInAllFrames(script, 'main', { throwOnJSErrors: true });
+   }
+ }
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/dispatchers/frameDispatcher.ts playwright/node_modules/playwright-core/src/server/dispatchers/frameDispatcher.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/dispatchers/frameDispatcher.ts	2025-02-20 16:47:20.806538915 +0000
++++ playwright/node_modules/playwright-core/src/server/dispatchers/frameDispatcher.ts	2025-02-20 16:47:27.471576592 +0000
+@@ -84,11 +84,15 @@
+   }
+ 
+   async evaluateExpression(params: channels.FrameEvaluateExpressionParams, metadata: CallMetadata): Promise<channels.FrameEvaluateExpressionResult> {
+-    return { value: serializeResult(await this._frame.evaluateExpression(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg))) };
++    return { value: serializeResult(await this._frame.evaluateExpression(params.expression, { isFunction: params.isFunction,
++      world: params.isolatedContext ? 'utility': 'main'
++    }, parseArgument(params.arg))) };
+   }
+ 
+   async evaluateExpressionHandle(params: channels.FrameEvaluateExpressionHandleParams, metadata: CallMetadata): Promise<channels.FrameEvaluateExpressionHandleResult> {
+-    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._frame.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg))) };
++    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._frame.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction,
++      world: params.isolatedContext ? 'utility': 'main'
++    }, parseArgument(params.arg))) };
+   }
+ 
+   async waitForSelector(params: channels.FrameWaitForSelectorParams, metadata: CallMetadata): Promise<channels.FrameWaitForSelectorResult> {
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts playwright/node_modules/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts	2025-02-20 16:47:20.806538915 +0000
++++ playwright/node_modules/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts	2025-02-20 16:47:27.471576592 +0000
+@@ -39,11 +39,11 @@
+   }
+ 
+   async evaluateExpression(params: channels.JSHandleEvaluateExpressionParams): Promise<channels.JSHandleEvaluateExpressionResult> {
+-    return { value: serializeResult(await this._object.evaluateExpression(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg))) };
++    return { value: serializeResult(await this._object.evaluateExpression(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg), params.isolatedContext)) };
+   }
+ 
+   async evaluateExpressionHandle(params: channels.JSHandleEvaluateExpressionHandleParams): Promise<channels.JSHandleEvaluateExpressionHandleResult> {
+-    const jsHandle = await this._object.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg));
++    const jsHandle = await this._object.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg), params.isolatedContext);
+     return { handle: ElementHandleDispatcher.fromJSHandle(this.parentScope(), jsHandle) };
+   }
+ 
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/dispatchers/pageDispatcher.ts playwright/node_modules/playwright-core/src/server/dispatchers/pageDispatcher.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/dispatchers/pageDispatcher.ts	2025-02-20 16:47:20.806538915 +0000
++++ playwright/node_modules/playwright-core/src/server/dispatchers/pageDispatcher.ts	2025-02-20 16:47:27.471576592 +0000
+@@ -353,11 +353,11 @@
+   }
+ 
+   async evaluateExpression(params: channels.WorkerEvaluateExpressionParams, metadata: CallMetadata): Promise<channels.WorkerEvaluateExpressionResult> {
+-    return { value: serializeResult(await this._object.evaluateExpression(params.expression, params.isFunction, parseArgument(params.arg))) };
++    return { value: serializeResult(await this._object.evaluateExpression(params.expression, params.isFunction, parseArgument(params.arg), params.isolatedContext)) };
+   }
+ 
+   async evaluateExpressionHandle(params: channels.WorkerEvaluateExpressionHandleParams, metadata: CallMetadata): Promise<channels.WorkerEvaluateExpressionHandleResult> {
+-    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._object.evaluateExpressionHandle(params.expression, params.isFunction, parseArgument(params.arg))) };
++    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._object.evaluateExpressionHandle(params.expression, params.isFunction, parseArgument(params.arg), params.isolatedContext)) };
+   }
+ }
+ 
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/firefox/ffPage.ts playwright/node_modules/playwright-core/src/server/firefox/ffPage.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/firefox/ffPage.ts	2025-02-20 16:47:20.807538921 +0000
++++ playwright/node_modules/playwright-core/src/server/firefox/ffPage.ts	2025-02-20 16:47:27.472576598 +0000
+@@ -391,7 +391,7 @@
+     await this._session.send('Page.setInitScripts', { scripts: this._initScripts.map(s => ({ script: s.initScript.source, worldName: s.worldName })) });
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     this._initScripts = this._initScripts.filter(s => s.initScript.internal);
+     await this._session.send('Page.setInitScripts', { scripts: this._initScripts.map(s => ({ script: s.initScript.source, worldName: s.worldName })) });
+   }
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/frames.ts playwright/node_modules/playwright-core/src/server/frames.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/frames.ts	2025-02-20 16:47:20.807538921 +0000
++++ playwright/node_modules/playwright-core/src/server/frames.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -1,3 +1,7 @@
++// undetected-undetected_playwright-patch - custom imports
++import { CRExecutionContext } from './chromium/crExecutionContext';
++import { FrameExecutionContext } from './dom';
++import crypto from 'crypto';
+ /**
+  * Copyright 2017 Google Inc. All rights reserved.
+  * Modifications copyright (c) Microsoft Corporation.
+@@ -530,6 +534,9 @@
+   }
+ 
+   _onClearLifecycle() {
++    this._isolatedWorld = undefined;
++    this._mainWorld = undefined;
++    this._iframeWorld = undefined;
+     for (const event of this._firedLifecycleEvents)
+       this.emit(Frame.Events.RemoveLifecycle, event);
+     this._firedLifecycleEvents.clear();
+@@ -743,12 +750,68 @@
+     return this._page._delegate.getFrameElement(this);
+   }
+ 
+-  _context(world: types.World): Promise<dom.FrameExecutionContext> {
+-    return this._contextData.get(world)!.contextPromise.then(contextOrDestroyedReason => {
+-      if (contextOrDestroyedReason instanceof js.ExecutionContext)
+-        return contextOrDestroyedReason;
+-      throw new Error(contextOrDestroyedReason.destroyedReason);
+-    });
++  async _context(world: types.World): Promise<dom.FrameExecutionContext> {
++    /* await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.enable');
++        var globalDoc = await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.getFrameOwner', { frameId: this._id });
++        if (globalDoc) {
++          await this._page._delegate._mainFrameSession._client._sendMayFail("DOM.resolveNode", { nodeId: globalDoc.nodeId })
++        } */
++
++        // if (this.isDetached()) throw new Error('Frame was detached');
++        try {
++          var client = this._page._delegate._sessionForFrame(this)._client
++        } catch (e) { var client = this._page._delegate._mainFrameSession._client }
++        var iframeExecutionContextId = await this._getFrameMainFrameContextId(client)
++
++        if (world == "main") {
++          // Iframe Only
++          if (this != this._page.mainFrame() && iframeExecutionContextId && this._iframeWorld == undefined) {
++            var executionContextId = iframeExecutionContextId
++            var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
++            this._iframeWorld = new FrameExecutionContext(crContext, this, world)
++            this._page._delegate._mainFrameSession._onExecutionContextCreated({
++              id: executionContextId, origin: world, name: world, auxData: { isDefault: this === this._page.mainFrame(), type: 'isolated', frameId: this._id }
++            })
++          } else if (this._mainWorld == undefined) {
++            var globalThis = await client._sendMayFail('Runtime.evaluate', {
++              expression: "globalThis",
++              serializationOptions: { serialization: "idOnly" }
++            });
++            if (!globalThis) { return }
++            var globalThisObjId = globalThis["result"]['objectId']
++            var executionContextId = parseInt(globalThisObjId.split('.')[1], 10);
++
++            var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
++            this._mainWorld = new FrameExecutionContext(crContext, this, world)
++            this._page._delegate._mainFrameSession._onExecutionContextCreated({
++              id: executionContextId, origin: world, name: world, auxData: { isDefault: this === this._page.mainFrame(), type: 'isolated', frameId: this._id }
++            })
++          }
++        }
++        if (world != "main" && this._isolatedWorld == undefined) {
++          world = "utility"
++          var result = await client._sendMayFail('Page.createIsolatedWorld', {
++            frameId: this._id, grantUniveralAccess: true, worldName: world
++          });
++          if (!result) {
++            // if (this.isDetached()) throw new Error("Frame was detached");
++            return
++          }
++          var executionContextId = result.executionContextId
++          var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
++          this._isolatedWorld = new FrameExecutionContext(crContext, this, world)
++          this._page._delegate._mainFrameSession._onExecutionContextCreated({
++            id: executionContextId, origin: world, name: world, auxData: { isDefault: this === this._page.mainFrame(), type: 'isolated', frameId: this._id }
++          })
++        }
++
++        if (world != "main") {
++          return this._isolatedWorld;
++        } else if (this != this._page.mainFrame() && iframeExecutionContextId) {
++          return this._iframeWorld;
++        } else {
++          return this._mainWorld;
++        }
+   }
+ 
+   _mainContext(): Promise<dom.FrameExecutionContext> {
+@@ -908,31 +971,38 @@
+   }
+ 
+   async setContent(metadata: CallMetadata, html: string, options: types.NavigateOptions = {}): Promise<void> {
+-    const controller = new ProgressController(metadata, this);
+-    return controller.run(async progress => {
+-      await this.raceNavigationAction(progress, options, async () => {
+-        const waitUntil = options.waitUntil === undefined ? 'load' : options.waitUntil;
+-        progress.log(`setting frame content, waiting until "${waitUntil}"`);
+-        const tag = `--playwright--set--content--${this._id}--${++this._setContentCounter}--`;
+-        const context = await this._utilityContext();
+-        const lifecyclePromise = new Promise((resolve, reject) => {
+-          this._page._frameManager._consoleMessageTags.set(tag, () => {
+-            // Clear lifecycle right after document.open() - see 'tag' below.
+-            this._onClearLifecycle();
+-            this._waitForLoadState(progress, waitUntil).then(resolve).catch(reject);
++      const controller = new ProgressController(metadata, this);
++      return controller.run(async progress => {
++        await this.raceNavigationAction(progress, options, async () => {
++          const waitUntil = options.waitUntil === undefined ? 'load' : options.waitUntil;
++          progress.log(`setting frame content, waiting until "${waitUntil}"`);
++          const tag = `--playwright--set--content--${this._id}--${++this._setContentCounter}--`;
++          const bindingName = "_tagDebug" + crypto.randomBytes(20).toString('hex');
++          const context = await this._utilityContext();
++          await this._page._delegate._mainFrameSession._client.send('Runtime.addBinding', { name: bindingName });
++          const lifecyclePromise = new Promise(async (resolve, reject) => {
++            await this._page.exposeBinding(bindingName, false, (tag) => {
++              this._onClearLifecycle();
++              this._waitForLoadState(progress, waitUntil).then(resolve).catch(reject);
++            });
++          });
++          const contentPromise = context.evaluate(({ html, tag, bindingName }) => {
++            document.open();
++            var _tagDebug = window[bindingName].bind({});
++            delete window[bindingName]
++            _tagDebug('{ "name": "' + bindingName + '", "seq": 1, "serializedArgs": ["' + tag + '"] }');
++            console.debug(tag);  // eslint-disable-line no-console
++            document.write(html);
++            document.close();
++          }, { html, tag,
++            bindingName
+           });
++          await Promise.all([contentPromise, lifecyclePromise]);
++          return null;
+         });
+-        const contentPromise = context.evaluate(({ html, tag }) => {
+-          document.open();
+-          console.debug(tag);  // eslint-disable-line no-console
+-          document.write(html);
+-          document.close();
+-        }, { html, tag });
+-        await Promise.all([contentPromise, lifecyclePromise]);
+-        return null;
+-      });
+-    }, this._page._timeoutSettings.navigationTimeout(options));
+-  }
++      }, this._page._timeoutSettings.navigationTimeout(options));
++    }
++
+ 
+   name(): string {
+     return this._name || '';
+@@ -1757,6 +1827,29 @@
+   private _asLocator(selector: string) {
+     return asLocator(this._page.attribution.playwright.options.sdkLanguage, selector);
+   }
++
++  _isolatedWorld: dom.FrameExecutionContext;
++  _mainWorld: dom.FrameExecutionContext;
++  _iframeWorld: dom.FrameExecutionContext;
++
++  async _getFrameMainFrameContextId(client): Promise<number> {
++    try {
++        var globalDocument = await client._sendMayFail("DOM.getFrameOwner", {frameId: this._id,});
++        if (globalDocument && globalDocument.nodeId) {
++          var describedNode = await client._sendMayFail("DOM.describeNode", {
++            backendNodeId: globalDocument.backendNodeId,
++          });
++          if (describedNode) {
++            var resolvedNode = await client._sendMayFail("DOM.resolveNode", {
++              nodeId: describedNode.node.contentDocument.nodeId,
++            });
++            var _executionContextId = parseInt(resolvedNode.object.objectId.split(".")[1], 10);
++            return _executionContextId;
++            }
++          }
++        } catch (e) {}
++        return 0;
++  }
+ }
+ 
+ class SignalBarrier {
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/javascript.ts playwright/node_modules/playwright-core/src/server/javascript.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/javascript.ts	2025-02-20 16:47:20.809538932 +0000
++++ playwright/node_modules/playwright-core/src/server/javascript.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -155,17 +155,33 @@
+     return evaluate(this._context, false /* returnByValue */, pageFunction, this, arg);
+   }
+ 
+-  async evaluateExpression(expression: string, options: { isFunction?: boolean }, arg: any) {
+-    const value = await evaluateExpression(this._context, expression, { ...options, returnByValue: true }, this, arg);
+-    await this._context.doSlowMo();
+-    return value;
+-  }
++  async evaluateExpression(expression: string, options: { isFunction?: boolean }, arg: any, isolatedContext?: boolean) {
++    let context = this._context;
++      if (context.constructor.name === "FrameExecutionContext") {
++          const frame = context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      const value = await evaluateExpression(context, expression, { ...options, returnByValue: true }, this, arg);
++      await context.doSlowMo();
++      return value;
++    }
+ 
+-  async evaluateExpressionHandle(expression: string, options: { isFunction?: boolean }, arg: any): Promise<JSHandle<any>> {
+-    const value = await evaluateExpression(this._context, expression, { ...options, returnByValue: false }, this, arg);
+-    await this._context.doSlowMo();
+-    return value;
+-  }
++  async evaluateExpressionHandle(expression: string, options: { isFunction?: boolean }, arg: any, isolatedContext?: boolean): Promise<JSHandle<any>> {
++    let context = this._context;
++      if (this._context.constructor.name === "FrameExecutionContext") {
++          const frame = this._context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      const value = await evaluateExpression(context, expression, { ...options, returnByValue: false }, this, arg);
++      await context.doSlowMo();
++      return value;
++    }
+ 
+   async getProperty(propertyName: string): Promise<JSHandle> {
+     const objectHandle = await this.evaluateHandle((object: any, propertyName) => {
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/page.ts playwright/node_modules/playwright-core/src/server/page.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/page.ts	2025-02-20 16:47:20.809538932 +0000
++++ playwright/node_modules/playwright-core/src/server/page.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -60,7 +60,7 @@
+   goForward(): Promise<boolean>;
+   requestGC(): Promise<void>;
+   addInitScript(initScript: InitScript): Promise<void>;
+-  removeNonInternalInitScripts(): Promise<void>;
++  removeInitScripts(): Promise<void>;
+   closePage(runBeforeUnload: boolean): Promise<void>;
+ 
+   navigateFrame(frame: frames.Frame, url: string, referrer: string | undefined): Promise<frames.GotoResult>;
+@@ -352,15 +352,15 @@
+       throw new Error(`Function "${name}" has been already registered in the browser context`);
+     const binding = new PageBinding(name, playwrightBinding, needsHandle);
+     this._pageBindings.set(name, binding);
+-    await this._delegate.addInitScript(binding.initScript);
+-    await Promise.all(this.frames().map(frame => frame.evaluateExpression(binding.initScript.source).catch(e => {})));
++    await this._delegate.exposeBinding(binding);
+   }
+ 
+   async _removeExposedBindings() {
+-    for (const [key, binding] of this._pageBindings) {
+-      if (!binding.internal)
++    for (const key of this._pageBindings.keys()) {
++      if (!key.startsWith('__pw'))
+         this._pageBindings.delete(key);
+     }
++    await this._delegate.removeExposedBindings();
+   }
+ 
+   setExtraHTTPHeaders(headers: types.HeadersArray) {
+@@ -577,8 +577,8 @@
+   }
+ 
+   async _removeInitScripts() {
+-    this.initScripts = this.initScripts.filter(script => script.internal);
+-    await this._delegate.removeNonInternalInitScripts();
++    this.initScripts.splice(0, this.initScripts.length);
++    await this._delegate.removeInitScripts();
+   }
+ 
+   needsRequestInterception(): boolean {
+@@ -770,11 +770,6 @@
+       this._browserContext.addVisitedOrigin(origin);
+   }
+ 
+-  allInitScripts() {
+-    const bindings = [...this._browserContext._pageBindings.values(), ...this._pageBindings.values()];
+-    return [...bindings.map(binding => binding.initScript), ...this._browserContext.initScripts, ...this.initScripts];
+-  }
+-
+   getBinding(name: string) {
+     return this._pageBindings.get(name) || this._browserContext._pageBindings.get(name);
+   }
+@@ -811,6 +806,10 @@
+   markAsServerSideOnly() {
+     this._isServerSideOnly = true;
+   }
++
++  allBindings() {
++    return [...this._browserContext._pageBindings.values(), ...this._pageBindings.values()];
++  }
+ }
+ 
+ export class Worker extends SdkObject {
+@@ -847,13 +846,29 @@
+     this.openScope.close(new Error('Worker closed'));
+   }
+ 
+-  async evaluateExpression(expression: string, isFunction: boolean | undefined, arg: any): Promise<any> {
+-    return js.evaluateExpression(await this._executionContextPromise, expression, { returnByValue: true, isFunction }, arg);
+-  }
++  async evaluateExpression(expression: string, isFunction: boolean | undefined, arg: any, isolatedContext?: boolean): Promise<any> {
++    let context = await this._executionContextPromise;
++      if (context.constructor.name === "FrameExecutionContext") {
++          const frame = context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      return js.evaluateExpression(context, expression, { returnByValue: true, isFunction }, arg);
++    }
+ 
+-  async evaluateExpressionHandle(expression: string, isFunction: boolean | undefined, arg: any): Promise<any> {
+-    return js.evaluateExpression(await this._executionContextPromise, expression, { returnByValue: false, isFunction }, arg);
+-  }
++  async evaluateExpressionHandle(expression: string, isFunction: boolean | undefined, arg: any, isolatedContext?: boolean): Promise<any> {
++    let context = await this._executionContextPromise;
++      if (this._context.constructor.name === "FrameExecutionContext") {
++          const frame = this._context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      return js.evaluateExpression(context, expression, { returnByValue: false, isFunction }, arg);
++    }
+ }
+ 
+ type BindingPayload = {
+@@ -863,20 +878,16 @@
+ };
+ 
+ export class PageBinding {
+-  static kPlaywrightBinding = '__playwright__binding__';
+-
+   readonly name: string;
+   readonly playwrightFunction: frames.FunctionWithSource;
+-  readonly initScript: InitScript;
+   readonly needsHandle: boolean;
+   readonly internal: boolean;
+ 
+   constructor(name: string, playwrightFunction: frames.FunctionWithSource, needsHandle: boolean) {
+     this.name = name;
+     this.playwrightFunction = playwrightFunction;
+-    this.initScript = new InitScript(`(${addPageBinding.toString()})(${JSON.stringify(PageBinding.kPlaywrightBinding)}, ${JSON.stringify(name)}, ${needsHandle}, (${source})())`, true /* internal */);
++    this.source = `(${addPageBinding.toString()})(${JSON.stringify(name)}, ${needsHandle}, (${source})())`;
+     this.needsHandle = needsHandle;
+-    this.internal = name.startsWith('__pw');
+   }
+ 
+   static async dispatch(page: Page, payload: string, context: dom.FrameExecutionContext) {
+@@ -916,10 +927,13 @@
+       callbacks.delete(arg.seq);
+     }
+   }
++
++  readonly source: string;
+ }
+ 
+-function addPageBinding(playwrightBinding: string, bindingName: string, needsHandle: boolean, utilityScriptSerializers: ReturnType<typeof source>) {
+-  const binding = (globalThis as any)[playwrightBinding];
++function addPageBinding(bindingName: string, needsHandle: boolean, utilityScriptSerializers: ReturnType<typeof source>) {
++  const binding = (globalThis as any)[bindingName];
++  if (binding && binding.toString().startsWith("(...args) => {")) return
+   (globalThis as any)[bindingName] = (...args: any[]) => {
+     const me = (globalThis as any)[bindingName];
+     if (needsHandle && args.slice(1).some(arg => arg !== undefined))
+@@ -953,7 +967,6 @@
+     binding(JSON.stringify(payload));
+     return promise;
+   };
+-  (globalThis as any)[bindingName].__installed = true;
+ }
+ 
+ export class InitScript {
+@@ -963,14 +976,7 @@
+ 
+   constructor(source: string, internal?: boolean, name?: string) {
+     const guid = createGuid();
+-    this.source = `(() => {
+-      globalThis.__pwInitScripts = globalThis.__pwInitScripts || {};
+-      const hasInitScript = globalThis.__pwInitScripts[${JSON.stringify(guid)}];
+-      if (hasInitScript)
+-        return;
+-      globalThis.__pwInitScripts[${JSON.stringify(guid)}] = true;
+-      ${source}
+-    })();`;
++    this.source = `(() => { ${source} })();`;
+     this.internal = !!internal;
+     this.name = name;
+   }
+diff -ruN playwright_not_patched/node_modules/playwright-core/src/server/webkit/wkPage.ts playwright/node_modules/playwright-core/src/server/webkit/wkPage.ts
+--- playwright_not_patched/node_modules/playwright-core/src/server/webkit/wkPage.ts	2025-02-20 16:47:20.813538954 +0000
++++ playwright/node_modules/playwright-core/src/server/webkit/wkPage.ts	2025-02-20 16:47:27.472576598 +0000
+@@ -769,7 +769,7 @@
+     await this._updateBootstrapScript();
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     await this._updateBootstrapScript();
+   }
+ 
+diff -ruN playwright_not_patched/packages/playwright-core/src/protocol/validator.ts playwright/packages/playwright-core/src/protocol/validator.ts
+--- playwright_not_patched/packages/playwright-core/src/protocol/validator.ts	2025-02-20 16:47:20.801538887 +0000
++++ playwright/packages/playwright-core/src/protocol/validator.ts	2025-02-20 16:47:27.467576570 +0000
+@@ -1545,6 +1545,7 @@
+   expression: tString,
+   isFunction: tOptional(tBoolean),
+   arg: tType('SerializedArgument'),
++  isolatedContext: tBoolean
+ });
+ scheme.FrameEvaluateExpressionResult = tObject({
+   value: tType('SerializedValue'),
+@@ -1830,6 +1831,7 @@
+   expression: tString,
+   isFunction: tOptional(tBoolean),
+   arg: tType('SerializedArgument'),
++  isolatedContext: tBoolean
+ });
+ scheme.WorkerEvaluateExpressionResult = tObject({
+   value: tType('SerializedValue'),
+@@ -1857,6 +1859,7 @@
+   expression: tString,
+   isFunction: tOptional(tBoolean),
+   arg: tType('SerializedArgument'),
++  isolatedContext: tBoolean
+ });
+ scheme.ElementHandleEvaluateExpressionParams = tType('JSHandleEvaluateExpressionParams');
+ scheme.JSHandleEvaluateExpressionResult = tObject({
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/bidi/bidiPage.ts playwright/packages/playwright-core/src/server/bidi/bidiPage.ts
+--- playwright_not_patched/packages/playwright-core/src/server/bidi/bidiPage.ts	2025-02-20 16:47:20.803538898 +0000
++++ playwright/packages/playwright-core/src/server/bidi/bidiPage.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -378,7 +378,7 @@
+       this._initScriptIds.push(script);
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     const promises = this._initScriptIds.map(script => this._session.send('script.removePreloadScript', { script }));
+     this._initScriptIds = [];
+     await Promise.all(promises);
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/browserContext.ts playwright/packages/playwright-core/src/server/browserContext.ts
+--- playwright_not_patched/packages/playwright-core/src/server/browserContext.ts	2025-02-20 16:47:20.803538898 +0000
++++ playwright/packages/playwright-core/src/server/browserContext.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -149,7 +149,7 @@
+     if (debugMode() === 'console')
+       await this.extendInjectedScript(consoleApiSource.source);
+     if (this._options.serviceWorkers === 'block')
+-      await this.addInitScript(`\nif (navigator.serviceWorker) navigator.serviceWorker.register = async () => { console.warn('Service Worker registration blocked by Playwright'); };\n`);
++      await this.addInitScript(`navigator.serviceWorker.register = async () => { };`);
+ 
+     if (this._options.permissions)
+       await this.grantPermissions(this._options.permissions);
+@@ -332,16 +332,15 @@
+     }
+     const binding = new PageBinding(name, playwrightBinding, needsHandle);
+     this._pageBindings.set(name, binding);
+-    await this.doAddInitScript(binding.initScript);
+-    const frames = this.pages().map(page => page.frames()).flat();
+-    await Promise.all(frames.map(frame => frame.evaluateExpression(binding.initScript.source).catch(e => {})));
++    await this.doExposeBinding(binding);
+   }
+ 
+   async _removeExposedBindings() {
+-    for (const [key, binding] of this._pageBindings) {
+-      if (!binding.internal)
++    for (const key of this._pageBindings.keys()) {
++      if (!key.startsWith('__pw'))
+         this._pageBindings.delete(key);
+     }
++    await this.doRemoveExposedBindings();
+   }
+ 
+   async grantPermissions(permissions: string[], origin?: string) {
+@@ -430,8 +429,8 @@
+   }
+ 
+   async _removeInitScripts(): Promise<void> {
+-    this.initScripts = this.initScripts.filter(script => script.internal);
+-    await this.doRemoveNonInternalInitScripts();
++    this.initScripts.splice(0, this.initScripts.length);
++    await this.doRemoveInitScripts();
+   }
+ 
+   async setRequestInterceptor(handler: network.RouteHandler | undefined): Promise<void> {
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/chromium/chromiumSwitches.ts playwright/packages/playwright-core/src/server/chromium/chromiumSwitches.ts
+--- playwright_not_patched/packages/playwright-core/src/server/chromium/chromiumSwitches.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/packages/playwright-core/src/server/chromium/chromiumSwitches.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -21,16 +21,10 @@
+   '--disable-field-trial-config', // https://source.chromium.org/chromium/chromium/src/+/main:testing/variations/README.md
+   '--disable-background-networking',
+   '--disable-background-timer-throttling',
+-  '--disable-backgrounding-occluded-windows',
+-  '--disable-back-forward-cache', // Avoids surprises like main request not being intercepted during page.goBack().
+-  '--disable-breakpad',
+-  '--disable-client-side-phishing-detection',
+-  '--disable-component-extensions-with-background-pages',
+-  '--disable-component-update', // Avoids unneeded network activity after startup.
++  '--disable-backgrounding-occluded-windows', // Avoids surprises like main request not being intercepted during page.goBack().
++  '--disable-breakpad', // Avoids unneeded network activity after startup.
+   '--no-default-browser-check',
+-  '--disable-default-apps',
+   '--disable-dev-shm-usage',
+-  '--disable-extensions',
+   // AvoidUnnecessaryBeforeUnloadCheckSync - https://github.com/microsoft/playwright/issues/14047
+   // Translate - https://github.com/microsoft/playwright/issues/16126
+   // HttpsUpgrades - https://github.com/microsoft/playwright/pull/27605
+@@ -41,16 +35,11 @@
+   //   making our navigation auto-wait after click not working. Can be removed once we deperecate noWaitAfter.
+   //   See https://github.com/microsoft/playwright/pull/34372.
+   '--disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,DeferRendererTasksAfterInput',
+-  '--allow-pre-commit-input',
+   '--disable-hang-monitor',
+-  '--disable-ipc-flooding-protection',
+-  '--disable-popup-blocking',
+   '--disable-prompt-on-repost',
+   '--disable-renderer-backgrounding',
+   '--force-color-profile=srgb',
+-  '--metrics-recording-only',
+   '--no-first-run',
+-  '--enable-automation',
+   '--password-store=basic',
+   '--use-mock-keychain',
+   // See https://chromium-review.googlesource.com/c/chromium/src/+/2436773
+@@ -58,6 +47,5 @@
+   '--export-tagged-pdf',
+   // https://chromium-review.googlesource.com/c/chromium/src/+/4853540
+   '--disable-search-engine-choice-screen',
+-  // https://issues.chromium.org/41491762
+-  '--unsafely-disable-devtools-self-xss-warnings',
++  '--disable-blink-features=AutomationControlled'
+ ];
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/chromium/crBrowser.ts playwright/packages/playwright-core/src/server/chromium/crBrowser.ts
+--- playwright_not_patched/packages/playwright-core/src/server/chromium/crBrowser.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/packages/playwright-core/src/server/chromium/crBrowser.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -494,11 +494,6 @@
+       await (page._delegate as CRPage).addInitScript(initScript);
+   }
+ 
+-  async doRemoveNonInternalInitScripts() {
+-    for (const page of this.pages())
+-      await (page._delegate as CRPage).removeNonInternalInitScripts();
+-  }
+-
+   async doUpdateRequestInterception(): Promise<void> {
+     for (const page of this.pages())
+       await (page._delegate as CRPage).updateRequestInterception();
+@@ -598,4 +593,16 @@
+     const rootSession = await this._browser._clientRootSession();
+     return rootSession.attachToTarget(targetId);
+   }
++
++  async doRemoveInitScripts() {
++    for (const page of this.pages()) await (page._delegate as CRPage).removeInitScripts();
++  }
++
++  async doExposeBinding(binding: PageBinding) {
++    for (const page of this.pages()) await (page._delegate as CRPage).exposeBinding(binding);
++  }
++
++  async doRemoveExposedBindings() {
++    for (const page of this.pages()) await (page._delegate as CRPage).removeExposedBindings();
++  }
+ }
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/chromium/crDevTools.ts playwright/packages/playwright-core/src/server/chromium/crDevTools.ts
+--- playwright_not_patched/packages/playwright-core/src/server/chromium/crDevTools.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/packages/playwright-core/src/server/chromium/crDevTools.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -67,7 +67,6 @@
+       }).catch(e => null);
+     });
+     Promise.all([
+-      session.send('Runtime.enable'),
+       session.send('Runtime.addBinding', { name: kBindingName }),
+       session.send('Page.enable'),
+       session.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/chromium/crNetworkManager.ts playwright/packages/playwright-core/src/server/chromium/crNetworkManager.ts
+--- playwright_not_patched/packages/playwright-core/src/server/chromium/crNetworkManager.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/packages/playwright-core/src/server/chromium/crNetworkManager.ts	2025-02-20 16:47:27.470576587 +0000
+@@ -1,3 +1,5 @@
++// undetected-undetected_playwright-patch - custom imports
++import crypto from 'crypto';
+ /**
+  * Copyright 2017 Google Inc. All rights reserved.
+  * Modifications copyright (c) Microsoft Corporation.
+@@ -156,7 +158,7 @@
+     const enabled = this._protocolRequestInterceptionEnabled;
+     if (initial && !enabled)
+       return;
+-    const cachePromise = info.session.send('Network.setCacheDisabled', { cacheDisabled: enabled });
++    const cachePromise = info.session.send('Network.setCacheDisabled', { cacheDisabled: false });
+     let fetchPromise = Promise.resolve<any>(undefined);
+     if (!info.workerFrame) {
+       if (enabled)
+@@ -342,7 +344,7 @@
+         headersOverride = redirectedFrom?._originalRequestRoute?._alreadyContinuedParams?.headers;
+         requestPausedSessionInfo!.session._sendMayFail('Fetch.continueRequest', { requestId: requestPausedEvent.requestId, headers: headersOverride });
+       } else {
+-        route = new RouteImpl(requestPausedSessionInfo!.session, requestPausedEvent.requestId);
++        route = new RouteImpl(requestPausedSessionInfo!.session, requestPausedEvent.requestId, this._page);
+       }
+     }
+     const isNavigationRequest = requestWillBeSentEvent.requestId === requestWillBeSentEvent.loaderId && requestWillBeSentEvent.type === 'Document';
+@@ -606,9 +608,11 @@
+   _alreadyContinuedParams: Protocol.Fetch.continueRequestParameters | undefined;
+   _fulfilled: boolean = false;
+ 
+-  constructor(session: CRSession, interceptionId: string) {
++  constructor(session: CRSession, interceptionId: string, page: Page) {
++    this._page = void 0;
+     this._session = session;
+     this._interceptionId = interceptionId;
++    this._page = page;
+   }
+ 
+   async continue(overrides: types.NormalizedContinueOverrides): Promise<void> {
+@@ -625,6 +629,42 @@
+   }
+ 
+   async fulfill(response: types.NormalizedFulfillResponse) {
++    const isTextHtml = response.headers.some(header => header.name === 'content-type' && header.value.includes('text/html'));
++      var allInjections = [...this._page._delegate._mainFrameSession._evaluateOnNewDocumentScripts];
++          for (const binding of this._page._delegate._browserContext._pageBindings.values()) {
++            if (!allInjections.includes(binding)) allInjections.push(binding);
++          }
++      if (isTextHtml && allInjections.length) {
++        // I Chatted so hard for this Code
++        let scriptNonce = crypto.randomBytes(22).toString('hex');
++        for (let i = 0; i < response.headers.length; i++) {
++          if (response.headers[i].name === 'content-security-policy' || response.headers[i].name === 'content-security-policy-report-only') {
++            // Search for an existing script-src nonce that we can hijack
++            let cspValue = response.headers[i].value;
++            const nonceRegex = /script-src[^;]*'nonce-([\w-]+)'/;
++            const nonceMatch = cspValue.match(nonceRegex);
++            if (nonceMatch) {
++              scriptNonce = nonceMatch[1];
++            } else {
++              // Add the new nonce value to the script-src directive
++              const scriptSrcRegex = /(script-src[^;]*)(;|$)/;
++              const newCspValue = cspValue.replace(scriptSrcRegex, `$1 'nonce-${scriptNonce}'$2`);
++              response.headers[i].value = newCspValue;
++            }
++            break;
++          }
++        }
++        let injectionHTML = "";
++        allInjections.forEach((script) => {
++          injectionHTML += `<script class="${this._page._delegate.initScriptTag}" nonce="${scriptNonce}" type="text/javascript">${script.source}</script>`;
++        });
++        if (response.isBase64) {
++          response.isBase64 = false;
++          response.body = injectionHTML + Buffer.from(response.body, 'base64').toString('utf-8');
++        } else {
++          response.body = injectionHTML + response.body;
++        }
++      }
+     this._fulfilled = true;
+     const body = response.isBase64 ? response.body : Buffer.from(response.body).toString('base64');
+ 
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/chromium/crPage.ts playwright/packages/playwright-core/src/server/chromium/crPage.ts
+--- playwright_not_patched/packages/playwright-core/src/server/chromium/crPage.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/packages/playwright-core/src/server/chromium/crPage.ts	2025-02-20 16:47:27.470576587 +0000
+@@ -1,3 +1,5 @@
++// undetected-undetected_playwright-patch - custom imports
++import crypto from 'crypto';
+ /**
+  * Copyright 2017 Google Inc. All rights reserved.
+  * Modifications copyright (c) Microsoft Corporation.
+@@ -101,7 +103,8 @@
+     this.updateOffline();
+     this.updateExtraHTTPHeaders();
+     this.updateHttpCredentials();
+-    this.updateRequestInterception();
++    this._networkManager.setRequestInterception(true);
++    this.initScriptTag = "injected-playwright-init-script-" + crypto.randomBytes(20).toString('hex');
+     this._mainFrameSession = new FrameSession(this, client, targetId, null);
+     this._sessions.set(targetId, this._mainFrameSession);
+     if (opener && !browserContext._options.noDefaultViewport) {
+@@ -231,10 +234,11 @@
+   }
+ 
+   async addInitScript(initScript: InitScript, world: types.World = 'main'): Promise<void> {
++    this._page.initScripts.push(initScript);
+     await this._forAllFrameSessions(frame => frame._evaluateOnNewDocument(initScript, world));
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     await this._forAllFrameSessions(frame => frame._removeEvaluatesOnNewDocument());
+   }
+ 
+@@ -369,6 +373,15 @@
+   shouldToggleStyleSheetToSyncAnimations(): boolean {
+     return false;
+   }
++
++  async exposeBinding(binding) {
++    await this._forAllFrameSessions(frame => frame._initBinding(binding));
++    await Promise.all(this._page.frames().map(frame => frame.evaluateExpression(binding.source).catch(e => {})));
++  }
++
++  async removeExposedBindings() {
++    await this._forAllFrameSessions(frame => frame._removeExposedBindings());
++  }
+ }
+ 
+ class FrameSession {
+@@ -483,19 +496,6 @@
+           this._handleFrameTree(frameTree);
+           this._addRendererListeners();
+         }
+-
+-        const localFrames = this._isMainFrame() ? this._page.frames() : [this._page._frameManager.frame(this._targetId)!];
+-        for (const frame of localFrames) {
+-          // Note: frames might be removed before we send these.
+-          this._client._sendMayFail('Page.createIsolatedWorld', {
+-            frameId: frame._id,
+-            grantUniveralAccess: true,
+-            worldName: UTILITY_WORLD_NAME,
+-          });
+-          for (const initScript of this._crPage._page.allInitScripts())
+-            frame.evaluateExpression(initScript.source).catch(e => {});
+-        }
+-
+         const isInitialEmptyPage = this._isMainFrame() && this._page.mainFrame().url() === ':';
+         if (isInitialEmptyPage) {
+           // Ignore lifecycle events, worlds and bindings for the initial empty page. It is never the final page
+@@ -505,14 +505,20 @@
+             this._eventListeners.push(eventsHelper.addEventListener(this._client, 'Page.lifecycleEvent', event => this._onLifecycleEvent(event)));
+           });
+         } else {
++          const localFrames = this._isMainFrame() ? this._page.frames() : [this._page._frameManager.frame(this._targetId)!];
++          for (const frame of localFrames) {
++            this._page._frameManager.frame(frame._id)._context("utility");
++            for (const binding of this._crPage._browserContext._pageBindings.values())
++              frame.evaluateExpression(binding.source).catch(e => {});
++            for (const source of this._crPage._browserContext.initScripts)
++              frame.evaluateExpression(source).catch(e => {});
++          }
+           this._firstNonInitialNavigationCommittedFulfill();
+           this._eventListeners.push(eventsHelper.addEventListener(this._client, 'Page.lifecycleEvent', event => this._onLifecycleEvent(event)));
+         }
+       }),
+       this._client.send('Log.enable', {}),
+       lifecycleEventsEnabled = this._client.send('Page.setLifecycleEventsEnabled', { enabled: true }),
+-      this._client.send('Runtime.enable', {}),
+-      this._client.send('Runtime.addBinding', { name: PageBinding.kPlaywrightBinding }),
+       this._client.send('Page.addScriptToEvaluateOnNewDocument', {
+         source: '',
+         worldName: UTILITY_WORLD_NAME,
+@@ -545,14 +551,16 @@
+       promises.push(this._updateGeolocation(true));
+       promises.push(this._updateEmulateMedia());
+       promises.push(this._updateFileChooserInterception(true));
+-      for (const initScript of this._crPage._page.allInitScripts())
+-        promises.push(this._evaluateOnNewDocument(initScript, 'main'));
++      for (const binding of this._crPage._page.allBindings()) promises.push(this._initBinding(binding));
++      for (const initScript of this._crPage._browserContext.initScripts) promises.push(this._evaluateOnNewDocument(initScript, 'main'));
++      for (const initScript of this._crPage._page.initScripts) promises.push(this._evaluateOnNewDocument(initScript, 'main'));
+       if (screencastOptions)
+         promises.push(this._startVideoRecording(screencastOptions));
+     }
+-    promises.push(this._client.send('Runtime.runIfWaitingForDebugger'));
++    if (!(this._crPage._page._pageBindings.size || this._crPage._browserContext._pageBindings.size)) promises.push(this._client.send('Runtime.runIfWaitingForDebugger'));
+     promises.push(this._firstNonInitialNavigationCommittedPromise);
+     await Promise.all(promises);
++    if (this._crPage._page._pageBindings.size || this._crPage._browserContext._pageBindings.size) await this._client.send('Runtime.runIfWaitingForDebugger');
+   }
+ 
+   dispose() {
+@@ -569,18 +577,30 @@
+ 
+   async _navigate(frame: frames.Frame, url: string, referrer: string | undefined): Promise<frames.GotoResult> {
+     const response = await this._client.send('Page.navigate', { url, referrer, frameId: frame._id, referrerPolicy: 'unsafeUrl' });
++    this._client._sendMayFail('Page.waitForDebugger');
+     if (response.errorText)
+       throw new frames.NavigationAbortedError(response.loaderId, `${response.errorText} at ${url}`);
+     return { newDocumentId: response.loaderId };
+   }
+ 
+-  _onLifecycleEvent(event: Protocol.Page.lifecycleEventPayload) {
++  async _onLifecycleEvent(event: Protocol.Page.lifecycleEventPayload) {
+     if (this._eventBelongsToStaleFrame(event.frameId))
+       return;
+     if (event.name === 'load')
+       this._page._frameManager.frameLifecycleEvent(event.frameId, 'load');
+     else if (event.name === 'DOMContentLoaded')
+       this._page._frameManager.frameLifecycleEvent(event.frameId, 'domcontentloaded');
++    var document = await this._client._sendMayFail("DOM.getDocument");
++      if (!document) return
++      var query = await this._client._sendMayFail("DOM.querySelectorAll", {
++        nodeId: document.root.nodeId,
++        selector: "[class=" + this._crPage.initScriptTag + "]"
++      });
++      if (!query) return
++      for (const nodeId of query.nodeIds) await this._client._sendMayFail("DOM.removeNode", { nodeId: nodeId });
++      await this._client._sendMayFail('Runtime.runIfWaitingForDebugger');
++      // ensuring execution context
++      try { await this._page._frameManager.frame(this._targetId)._context("utility") } catch { };
+   }
+ 
+   _handleFrameTree(frameTree: Protocol.Page.FrameTree) {
+@@ -627,12 +647,23 @@
+     this._page._frameManager.frameAttached(frameId, parentFrameId);
+   }
+ 
+-  _onFrameNavigated(framePayload: Protocol.Page.Frame, initial: boolean) {
++  async _onFrameNavigated(framePayload: Protocol.Page.Frame, initial: boolean) {
+     if (this._eventBelongsToStaleFrame(framePayload.id))
+       return;
+     this._page._frameManager.frameCommittedNewDocumentNavigation(framePayload.id, framePayload.url + (framePayload.urlFragment || ''), framePayload.name || '', framePayload.loaderId, initial);
+     if (!initial)
+       this._firstNonInitialNavigationCommittedFulfill();
++    var document = await this._client._sendMayFail("DOM.getDocument");
++      if (!document) return
++      var query = await this._client._sendMayFail("DOM.querySelectorAll", {
++        nodeId: document.root.nodeId,
++        selector: "[class=" + this._crPage.initScriptTag + "]"
++      });
++      if (!query) return
++      for (const nodeId of query.nodeIds) await this._client._sendMayFail("DOM.removeNode", { nodeId: nodeId });
++      await this._client._sendMayFail('Runtime.runIfWaitingForDebugger');
++      // ensuring execution context
++      try { await this._page._frameManager.frame(this._targetId)._context("utility") } catch { };
+   }
+ 
+   _onFrameRequestedNavigation(payload: Protocol.Page.frameRequestedNavigationPayload) {
+@@ -669,20 +700,25 @@
+   }
+ 
+   _onExecutionContextCreated(contextPayload: Protocol.Runtime.ExecutionContextDescription) {
++    for (const name of this._exposedBindingNames) this._client._sendMayFail('Runtime.addBinding', { name: name, executionContextId: contextPayload.id });
+     const frame = contextPayload.auxData ? this._page._frameManager.frame(contextPayload.auxData.frameId) : null;
++    if (contextPayload.auxData.type == "worker") throw new Error("ExecutionContext is worker");
+     if (!frame || this._eventBelongsToStaleFrame(frame._id))
+       return;
+     const delegate = new CRExecutionContext(this._client, contextPayload);
+-    let worldName: types.World|null = null;
+-    if (contextPayload.auxData && !!contextPayload.auxData.isDefault)
+-      worldName = 'main';
+-    else if (contextPayload.name === UTILITY_WORLD_NAME)
+-      worldName = 'utility';
++    let worldName = contextPayload.name;
+     const context = new dom.FrameExecutionContext(delegate, frame, worldName);
+     (context as any)[contextDelegateSymbol] = delegate;
+     if (worldName)
+       frame._contextCreated(worldName, context);
+     this._contextIdToContext.set(contextPayload.id, context);
++    for (const source of this._exposedBindingScripts) {
++      this._client._sendMayFail("Runtime.evaluate", {
++        expression: source,
++        contextId: contextPayload.id,
++        awaitPromise: true,
++      })
++    }
+   }
+ 
+   _onExecutionContextDestroyed(executionContextId: number) {
+@@ -698,7 +734,7 @@
+       this._onExecutionContextDestroyed(contextId);
+   }
+ 
+-  _onAttachedToTarget(event: Protocol.Target.attachedToTargetPayload) {
++  async _onAttachedToTarget(event: Protocol.Target.attachedToTargetPayload) {
+     const session = this._client.createChildSession(event.sessionId);
+ 
+     if (event.targetInfo.type === 'iframe') {
+@@ -730,8 +766,17 @@
+     session.once('Runtime.executionContextCreated', async event => {
+       worker._createExecutionContext(new CRExecutionContext(session, event.context));
+     });
++    var globalThis = await session._sendMayFail('Runtime.evaluate', {
++      expression: "globalThis",
++      serializationOptions: { serialization: "idOnly" }
++
++    });
++    if (globalThis && globalThis.result) {
++      var globalThisObjId = globalThis.result.objectId;
++      var executionContextId = parseInt(globalThisObjId.split('.')[1], 10);
++      worker._createExecutionContext(new CRExecutionContext(session, { id: executionContextId }));
++    }
+     // This might fail if the target is closed before we initialize.
+-    session._sendMayFail('Runtime.enable');
+     // TODO: attribute workers to the right frame.
+     this._crPage._networkManager.addSession(session, this._page._frameManager.frame(this._targetId) ?? undefined).catch(() => {});
+     session._sendMayFail('Runtime.runIfWaitingForDebugger');
+@@ -810,8 +855,8 @@
+     const pageOrError = await this._crPage._page.waitForInitializedOrError();
+     if (!(pageOrError instanceof Error)) {
+       const context = this._contextIdToContext.get(event.executionContextId);
+-      if (context)
+-        await this._page._onBindingCalled(event.payload, context);
++      if (context) await this._page._onBindingCalled(event.payload, context);
++      else await this._page._onBindingCalled(event.payload, (await this._page.mainFrame()._mainContext())) // This might be a bit sketchy but it works for now
+     }
+   }
+ 
+@@ -1057,16 +1102,11 @@
+   }
+ 
+   async _evaluateOnNewDocument(initScript: InitScript, world: types.World): Promise<void> {
+-    const worldName = world === 'utility' ? UTILITY_WORLD_NAME : undefined;
+-    const { identifier } = await this._client.send('Page.addScriptToEvaluateOnNewDocument', { source: initScript.source, worldName });
+-    if (!initScript.internal)
+-      this._evaluateOnNewDocumentIdentifiers.push(identifier);
++    this._evaluateOnNewDocumentScripts.push(initScript)
+   }
+ 
+   async _removeEvaluatesOnNewDocument(): Promise<void> {
+-    const identifiers = this._evaluateOnNewDocumentIdentifiers;
+-    this._evaluateOnNewDocumentIdentifiers = [];
+-    await Promise.all(identifiers.map(identifier => this._client.send('Page.removeScriptToEvaluateOnNewDocument', { identifier })));
++    this._evaluateOnNewDocumentScripts = [];
+   }
+ 
+   async _getContentFrame(handle: dom.ElementHandle): Promise<frames.Frame | null> {
+@@ -1167,12 +1207,53 @@
+   async _adoptBackendNodeId(backendNodeId: Protocol.DOM.BackendNodeId, to: dom.FrameExecutionContext): Promise<dom.ElementHandle> {
+     const result = await this._client._sendMayFail('DOM.resolveNode', {
+       backendNodeId,
+-      executionContextId: ((to as any)[contextDelegateSymbol] as CRExecutionContext)._contextId,
++      executionContextId: to._delegate._contextId,
+     });
+     if (!result || result.object.subtype === 'null')
+       throw new Error(dom.kUnableToAdoptErrorMessage);
+     return to.createHandle(result.object).asElement()!;
+   }
++
++  _exposedBindingNames: string[] = [];
++  _evaluateOnNewDocumentScripts: string[] = [];
++  _parsedExecutionContextIds: number[] = [];
++  _exposedBindingScripts: string[] = [];
++
++  async _initBinding(binding = PageBinding) {
++    var result = await this._client._sendMayFail('Page.createIsolatedWorld', {
++      frameId: this._targetId, grantUniveralAccess: true, worldName: "utility"
++    });
++    if (!result) return
++    var isolatedContextId = result.executionContextId
++
++    var globalThis = await this._client._sendMayFail('Runtime.evaluate', {
++      expression: "globalThis",
++      serializationOptions: { serialization: "idOnly" }
++    });
++    if (!globalThis) return
++    var globalThisObjId = globalThis["result"]['objectId']
++    var mainContextId = parseInt(globalThisObjId.split('.')[1], 10);
++
++    await Promise.all([
++      this._client._sendMayFail('Runtime.addBinding', { name: binding.name }),
++      this._client._sendMayFail('Runtime.addBinding', { name: binding.name, executionContextId: mainContextId }),
++      this._client._sendMayFail('Runtime.addBinding', { name: binding.name, executionContextId: isolatedContextId }),
++      // this._client._sendMayFail("Runtime.evaluate", { expression: binding.source, contextId: mainContextId, awaitPromise: true })
++    ]);
++    this._exposedBindingNames.push(binding.name);
++    this._exposedBindingScripts.push(binding.source);
++    await this._crPage.addInitScript(binding.source);
++    //this._client._sendMayFail('Runtime.runIfWaitingForDebugger')
++  }
++
++  async _removeExposedBindings() {
++    const toRetain: string[] = [];
++    const toRemove: string[] = [];
++    for (const name of this._exposedBindingNames)
++      (name.startsWith('__pw_') ? toRetain : toRemove).push(name);
++    this._exposedBindingNames = toRetain;
++    await Promise.all(toRemove.map(name => this._client.send('Runtime.removeBinding', { name })));
++  }
+ }
+ 
+ async function emulateLocale(session: CRSession, locale: string) {
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/chromium/crServiceWorker.ts playwright/packages/playwright-core/src/server/chromium/crServiceWorker.ts
+--- playwright_not_patched/packages/playwright-core/src/server/chromium/crServiceWorker.ts	2025-02-20 16:47:20.804538904 +0000
++++ playwright/packages/playwright-core/src/server/chromium/crServiceWorker.ts	2025-02-20 16:47:27.470576587 +0000
+@@ -44,8 +44,6 @@
+       this.updateOffline();
+       this._networkManager.addSession(session, undefined, true /* isMain */).catch(() => {});
+     }
+-
+-    session.send('Runtime.enable', {}).catch(e => { });
+     session.send('Runtime.runIfWaitingForDebugger').catch(e => { });
+     session.on('Inspector.targetReloadedAfterCrash', () => {
+       // Resume service worker after restart.
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/clock.ts playwright/packages/playwright-core/src/server/clock.ts
+--- playwright_not_patched/packages/playwright-core/src/server/clock.ts	2025-02-20 16:47:20.805538909 +0000
++++ playwright/packages/playwright-core/src/server/clock.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -92,6 +92,14 @@
+   }
+ 
+   private async _evaluateInFrames(script: string) {
++    // Dont ask me why this works
++    await Promise.all(this._browserContext.pages().map(async page => {
++      await Promise.all(page.frames().map(async frame => {
++        try {
++          await frame.evaluateExpression("");
++        } catch (e) {}
++      }));
++    }));
+     await this._browserContext.safeNonStallingEvaluateInAllFrames(script, 'main', { throwOnJSErrors: true });
+   }
+ }
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/dispatchers/frameDispatcher.ts playwright/packages/playwright-core/src/server/dispatchers/frameDispatcher.ts
+--- playwright_not_patched/packages/playwright-core/src/server/dispatchers/frameDispatcher.ts	2025-02-20 16:47:20.806538915 +0000
++++ playwright/packages/playwright-core/src/server/dispatchers/frameDispatcher.ts	2025-02-20 16:47:27.471576592 +0000
+@@ -84,11 +84,15 @@
+   }
+ 
+   async evaluateExpression(params: channels.FrameEvaluateExpressionParams, metadata: CallMetadata): Promise<channels.FrameEvaluateExpressionResult> {
+-    return { value: serializeResult(await this._frame.evaluateExpression(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg))) };
++    return { value: serializeResult(await this._frame.evaluateExpression(params.expression, { isFunction: params.isFunction,
++      world: params.isolatedContext ? 'utility': 'main'
++    }, parseArgument(params.arg))) };
+   }
+ 
+   async evaluateExpressionHandle(params: channels.FrameEvaluateExpressionHandleParams, metadata: CallMetadata): Promise<channels.FrameEvaluateExpressionHandleResult> {
+-    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._frame.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg))) };
++    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._frame.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction,
++      world: params.isolatedContext ? 'utility': 'main'
++    }, parseArgument(params.arg))) };
+   }
+ 
+   async waitForSelector(params: channels.FrameWaitForSelectorParams, metadata: CallMetadata): Promise<channels.FrameWaitForSelectorResult> {
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts playwright/packages/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts
+--- playwright_not_patched/packages/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts	2025-02-20 16:47:20.806538915 +0000
++++ playwright/packages/playwright-core/src/server/dispatchers/jsHandleDispatcher.ts	2025-02-20 16:47:27.471576592 +0000
+@@ -39,11 +39,11 @@
+   }
+ 
+   async evaluateExpression(params: channels.JSHandleEvaluateExpressionParams): Promise<channels.JSHandleEvaluateExpressionResult> {
+-    return { value: serializeResult(await this._object.evaluateExpression(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg))) };
++    return { value: serializeResult(await this._object.evaluateExpression(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg), params.isolatedContext)) };
+   }
+ 
+   async evaluateExpressionHandle(params: channels.JSHandleEvaluateExpressionHandleParams): Promise<channels.JSHandleEvaluateExpressionHandleResult> {
+-    const jsHandle = await this._object.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg));
++    const jsHandle = await this._object.evaluateExpressionHandle(params.expression, { isFunction: params.isFunction }, parseArgument(params.arg), params.isolatedContext);
+     return { handle: ElementHandleDispatcher.fromJSHandle(this.parentScope(), jsHandle) };
+   }
+ 
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/dispatchers/pageDispatcher.ts playwright/packages/playwright-core/src/server/dispatchers/pageDispatcher.ts
+--- playwright_not_patched/packages/playwright-core/src/server/dispatchers/pageDispatcher.ts	2025-02-20 16:47:20.806538915 +0000
++++ playwright/packages/playwright-core/src/server/dispatchers/pageDispatcher.ts	2025-02-20 16:47:27.471576592 +0000
+@@ -353,11 +353,11 @@
+   }
+ 
+   async evaluateExpression(params: channels.WorkerEvaluateExpressionParams, metadata: CallMetadata): Promise<channels.WorkerEvaluateExpressionResult> {
+-    return { value: serializeResult(await this._object.evaluateExpression(params.expression, params.isFunction, parseArgument(params.arg))) };
++    return { value: serializeResult(await this._object.evaluateExpression(params.expression, params.isFunction, parseArgument(params.arg), params.isolatedContext)) };
+   }
+ 
+   async evaluateExpressionHandle(params: channels.WorkerEvaluateExpressionHandleParams, metadata: CallMetadata): Promise<channels.WorkerEvaluateExpressionHandleResult> {
+-    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._object.evaluateExpressionHandle(params.expression, params.isFunction, parseArgument(params.arg))) };
++    return { handle: ElementHandleDispatcher.fromJSHandle(this, await this._object.evaluateExpressionHandle(params.expression, params.isFunction, parseArgument(params.arg), params.isolatedContext)) };
+   }
+ }
+ 
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/firefox/ffPage.ts playwright/packages/playwright-core/src/server/firefox/ffPage.ts
+--- playwright_not_patched/packages/playwright-core/src/server/firefox/ffPage.ts	2025-02-20 16:47:20.807538921 +0000
++++ playwright/packages/playwright-core/src/server/firefox/ffPage.ts	2025-02-20 16:47:27.472576598 +0000
+@@ -391,7 +391,7 @@
+     await this._session.send('Page.setInitScripts', { scripts: this._initScripts.map(s => ({ script: s.initScript.source, worldName: s.worldName })) });
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     this._initScripts = this._initScripts.filter(s => s.initScript.internal);
+     await this._session.send('Page.setInitScripts', { scripts: this._initScripts.map(s => ({ script: s.initScript.source, worldName: s.worldName })) });
+   }
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/frames.ts playwright/packages/playwright-core/src/server/frames.ts
+--- playwright_not_patched/packages/playwright-core/src/server/frames.ts	2025-02-20 16:47:20.807538921 +0000
++++ playwright/packages/playwright-core/src/server/frames.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -1,3 +1,7 @@
++// undetected-undetected_playwright-patch - custom imports
++import { CRExecutionContext } from './chromium/crExecutionContext';
++import { FrameExecutionContext } from './dom';
++import crypto from 'crypto';
+ /**
+  * Copyright 2017 Google Inc. All rights reserved.
+  * Modifications copyright (c) Microsoft Corporation.
+@@ -530,6 +534,9 @@
+   }
+ 
+   _onClearLifecycle() {
++    this._isolatedWorld = undefined;
++    this._mainWorld = undefined;
++    this._iframeWorld = undefined;
+     for (const event of this._firedLifecycleEvents)
+       this.emit(Frame.Events.RemoveLifecycle, event);
+     this._firedLifecycleEvents.clear();
+@@ -743,12 +750,68 @@
+     return this._page._delegate.getFrameElement(this);
+   }
+ 
+-  _context(world: types.World): Promise<dom.FrameExecutionContext> {
+-    return this._contextData.get(world)!.contextPromise.then(contextOrDestroyedReason => {
+-      if (contextOrDestroyedReason instanceof js.ExecutionContext)
+-        return contextOrDestroyedReason;
+-      throw new Error(contextOrDestroyedReason.destroyedReason);
+-    });
++  async _context(world: types.World): Promise<dom.FrameExecutionContext> {
++    /* await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.enable');
++        var globalDoc = await this._page._delegate._mainFrameSession._client._sendMayFail('DOM.getFrameOwner', { frameId: this._id });
++        if (globalDoc) {
++          await this._page._delegate._mainFrameSession._client._sendMayFail("DOM.resolveNode", { nodeId: globalDoc.nodeId })
++        } */
++
++        // if (this.isDetached()) throw new Error('Frame was detached');
++        try {
++          var client = this._page._delegate._sessionForFrame(this)._client
++        } catch (e) { var client = this._page._delegate._mainFrameSession._client }
++        var iframeExecutionContextId = await this._getFrameMainFrameContextId(client)
++
++        if (world == "main") {
++          // Iframe Only
++          if (this != this._page.mainFrame() && iframeExecutionContextId && this._iframeWorld == undefined) {
++            var executionContextId = iframeExecutionContextId
++            var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
++            this._iframeWorld = new FrameExecutionContext(crContext, this, world)
++            this._page._delegate._mainFrameSession._onExecutionContextCreated({
++              id: executionContextId, origin: world, name: world, auxData: { isDefault: this === this._page.mainFrame(), type: 'isolated', frameId: this._id }
++            })
++          } else if (this._mainWorld == undefined) {
++            var globalThis = await client._sendMayFail('Runtime.evaluate', {
++              expression: "globalThis",
++              serializationOptions: { serialization: "idOnly" }
++            });
++            if (!globalThis) { return }
++            var globalThisObjId = globalThis["result"]['objectId']
++            var executionContextId = parseInt(globalThisObjId.split('.')[1], 10);
++
++            var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
++            this._mainWorld = new FrameExecutionContext(crContext, this, world)
++            this._page._delegate._mainFrameSession._onExecutionContextCreated({
++              id: executionContextId, origin: world, name: world, auxData: { isDefault: this === this._page.mainFrame(), type: 'isolated', frameId: this._id }
++            })
++          }
++        }
++        if (world != "main" && this._isolatedWorld == undefined) {
++          world = "utility"
++          var result = await client._sendMayFail('Page.createIsolatedWorld', {
++            frameId: this._id, grantUniveralAccess: true, worldName: world
++          });
++          if (!result) {
++            // if (this.isDetached()) throw new Error("Frame was detached");
++            return
++          }
++          var executionContextId = result.executionContextId
++          var crContext = new CRExecutionContext(client, { id: executionContextId }, this._id)
++          this._isolatedWorld = new FrameExecutionContext(crContext, this, world)
++          this._page._delegate._mainFrameSession._onExecutionContextCreated({
++            id: executionContextId, origin: world, name: world, auxData: { isDefault: this === this._page.mainFrame(), type: 'isolated', frameId: this._id }
++          })
++        }
++
++        if (world != "main") {
++          return this._isolatedWorld;
++        } else if (this != this._page.mainFrame() && iframeExecutionContextId) {
++          return this._iframeWorld;
++        } else {
++          return this._mainWorld;
++        }
+   }
+ 
+   _mainContext(): Promise<dom.FrameExecutionContext> {
+@@ -908,31 +971,38 @@
+   }
+ 
+   async setContent(metadata: CallMetadata, html: string, options: types.NavigateOptions = {}): Promise<void> {
+-    const controller = new ProgressController(metadata, this);
+-    return controller.run(async progress => {
+-      await this.raceNavigationAction(progress, options, async () => {
+-        const waitUntil = options.waitUntil === undefined ? 'load' : options.waitUntil;
+-        progress.log(`setting frame content, waiting until "${waitUntil}"`);
+-        const tag = `--playwright--set--content--${this._id}--${++this._setContentCounter}--`;
+-        const context = await this._utilityContext();
+-        const lifecyclePromise = new Promise((resolve, reject) => {
+-          this._page._frameManager._consoleMessageTags.set(tag, () => {
+-            // Clear lifecycle right after document.open() - see 'tag' below.
+-            this._onClearLifecycle();
+-            this._waitForLoadState(progress, waitUntil).then(resolve).catch(reject);
++      const controller = new ProgressController(metadata, this);
++      return controller.run(async progress => {
++        await this.raceNavigationAction(progress, options, async () => {
++          const waitUntil = options.waitUntil === undefined ? 'load' : options.waitUntil;
++          progress.log(`setting frame content, waiting until "${waitUntil}"`);
++          const tag = `--playwright--set--content--${this._id}--${++this._setContentCounter}--`;
++          const bindingName = "_tagDebug" + crypto.randomBytes(20).toString('hex');
++          const context = await this._utilityContext();
++          await this._page._delegate._mainFrameSession._client.send('Runtime.addBinding', { name: bindingName });
++          const lifecyclePromise = new Promise(async (resolve, reject) => {
++            await this._page.exposeBinding(bindingName, false, (tag) => {
++              this._onClearLifecycle();
++              this._waitForLoadState(progress, waitUntil).then(resolve).catch(reject);
++            });
++          });
++          const contentPromise = context.evaluate(({ html, tag, bindingName }) => {
++            document.open();
++            var _tagDebug = window[bindingName].bind({});
++            delete window[bindingName]
++            _tagDebug('{ "name": "' + bindingName + '", "seq": 1, "serializedArgs": ["' + tag + '"] }');
++            console.debug(tag);  // eslint-disable-line no-console
++            document.write(html);
++            document.close();
++          }, { html, tag,
++            bindingName
+           });
++          await Promise.all([contentPromise, lifecyclePromise]);
++          return null;
+         });
+-        const contentPromise = context.evaluate(({ html, tag }) => {
+-          document.open();
+-          console.debug(tag);  // eslint-disable-line no-console
+-          document.write(html);
+-          document.close();
+-        }, { html, tag });
+-        await Promise.all([contentPromise, lifecyclePromise]);
+-        return null;
+-      });
+-    }, this._page._timeoutSettings.navigationTimeout(options));
+-  }
++      }, this._page._timeoutSettings.navigationTimeout(options));
++    }
++
+ 
+   name(): string {
+     return this._name || '';
+@@ -1757,6 +1827,29 @@
+   private _asLocator(selector: string) {
+     return asLocator(this._page.attribution.playwright.options.sdkLanguage, selector);
+   }
++
++  _isolatedWorld: dom.FrameExecutionContext;
++  _mainWorld: dom.FrameExecutionContext;
++  _iframeWorld: dom.FrameExecutionContext;
++
++  async _getFrameMainFrameContextId(client): Promise<number> {
++    try {
++        var globalDocument = await client._sendMayFail("DOM.getFrameOwner", {frameId: this._id,});
++        if (globalDocument && globalDocument.nodeId) {
++          var describedNode = await client._sendMayFail("DOM.describeNode", {
++            backendNodeId: globalDocument.backendNodeId,
++          });
++          if (describedNode) {
++            var resolvedNode = await client._sendMayFail("DOM.resolveNode", {
++              nodeId: describedNode.node.contentDocument.nodeId,
++            });
++            var _executionContextId = parseInt(resolvedNode.object.objectId.split(".")[1], 10);
++            return _executionContextId;
++            }
++          }
++        } catch (e) {}
++        return 0;
++  }
+ }
+ 
+ class SignalBarrier {
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/javascript.ts playwright/packages/playwright-core/src/server/javascript.ts
+--- playwright_not_patched/packages/playwright-core/src/server/javascript.ts	2025-02-20 16:47:20.809538932 +0000
++++ playwright/packages/playwright-core/src/server/javascript.ts	2025-02-20 16:47:27.468576575 +0000
+@@ -155,17 +155,33 @@
+     return evaluate(this._context, false /* returnByValue */, pageFunction, this, arg);
+   }
+ 
+-  async evaluateExpression(expression: string, options: { isFunction?: boolean }, arg: any) {
+-    const value = await evaluateExpression(this._context, expression, { ...options, returnByValue: true }, this, arg);
+-    await this._context.doSlowMo();
+-    return value;
+-  }
++  async evaluateExpression(expression: string, options: { isFunction?: boolean }, arg: any, isolatedContext?: boolean) {
++    let context = this._context;
++      if (context.constructor.name === "FrameExecutionContext") {
++          const frame = context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      const value = await evaluateExpression(context, expression, { ...options, returnByValue: true }, this, arg);
++      await context.doSlowMo();
++      return value;
++    }
+ 
+-  async evaluateExpressionHandle(expression: string, options: { isFunction?: boolean }, arg: any): Promise<JSHandle<any>> {
+-    const value = await evaluateExpression(this._context, expression, { ...options, returnByValue: false }, this, arg);
+-    await this._context.doSlowMo();
+-    return value;
+-  }
++  async evaluateExpressionHandle(expression: string, options: { isFunction?: boolean }, arg: any, isolatedContext?: boolean): Promise<JSHandle<any>> {
++    let context = this._context;
++      if (this._context.constructor.name === "FrameExecutionContext") {
++          const frame = this._context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      const value = await evaluateExpression(context, expression, { ...options, returnByValue: false }, this, arg);
++      await context.doSlowMo();
++      return value;
++    }
+ 
+   async getProperty(propertyName: string): Promise<JSHandle> {
+     const objectHandle = await this.evaluateHandle((object: any, propertyName) => {
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/page.ts playwright/packages/playwright-core/src/server/page.ts
+--- playwright_not_patched/packages/playwright-core/src/server/page.ts	2025-02-20 16:47:20.809538932 +0000
++++ playwright/packages/playwright-core/src/server/page.ts	2025-02-20 16:47:27.469576581 +0000
+@@ -60,7 +60,7 @@
+   goForward(): Promise<boolean>;
+   requestGC(): Promise<void>;
+   addInitScript(initScript: InitScript): Promise<void>;
+-  removeNonInternalInitScripts(): Promise<void>;
++  removeInitScripts(): Promise<void>;
+   closePage(runBeforeUnload: boolean): Promise<void>;
+ 
+   navigateFrame(frame: frames.Frame, url: string, referrer: string | undefined): Promise<frames.GotoResult>;
+@@ -352,15 +352,15 @@
+       throw new Error(`Function "${name}" has been already registered in the browser context`);
+     const binding = new PageBinding(name, playwrightBinding, needsHandle);
+     this._pageBindings.set(name, binding);
+-    await this._delegate.addInitScript(binding.initScript);
+-    await Promise.all(this.frames().map(frame => frame.evaluateExpression(binding.initScript.source).catch(e => {})));
++    await this._delegate.exposeBinding(binding);
+   }
+ 
+   async _removeExposedBindings() {
+-    for (const [key, binding] of this._pageBindings) {
+-      if (!binding.internal)
++    for (const key of this._pageBindings.keys()) {
++      if (!key.startsWith('__pw'))
+         this._pageBindings.delete(key);
+     }
++    await this._delegate.removeExposedBindings();
+   }
+ 
+   setExtraHTTPHeaders(headers: types.HeadersArray) {
+@@ -577,8 +577,8 @@
+   }
+ 
+   async _removeInitScripts() {
+-    this.initScripts = this.initScripts.filter(script => script.internal);
+-    await this._delegate.removeNonInternalInitScripts();
++    this.initScripts.splice(0, this.initScripts.length);
++    await this._delegate.removeInitScripts();
+   }
+ 
+   needsRequestInterception(): boolean {
+@@ -770,11 +770,6 @@
+       this._browserContext.addVisitedOrigin(origin);
+   }
+ 
+-  allInitScripts() {
+-    const bindings = [...this._browserContext._pageBindings.values(), ...this._pageBindings.values()];
+-    return [...bindings.map(binding => binding.initScript), ...this._browserContext.initScripts, ...this.initScripts];
+-  }
+-
+   getBinding(name: string) {
+     return this._pageBindings.get(name) || this._browserContext._pageBindings.get(name);
+   }
+@@ -811,6 +806,10 @@
+   markAsServerSideOnly() {
+     this._isServerSideOnly = true;
+   }
++
++  allBindings() {
++    return [...this._browserContext._pageBindings.values(), ...this._pageBindings.values()];
++  }
+ }
+ 
+ export class Worker extends SdkObject {
+@@ -847,13 +846,29 @@
+     this.openScope.close(new Error('Worker closed'));
+   }
+ 
+-  async evaluateExpression(expression: string, isFunction: boolean | undefined, arg: any): Promise<any> {
+-    return js.evaluateExpression(await this._executionContextPromise, expression, { returnByValue: true, isFunction }, arg);
+-  }
++  async evaluateExpression(expression: string, isFunction: boolean | undefined, arg: any, isolatedContext?: boolean): Promise<any> {
++    let context = await this._executionContextPromise;
++      if (context.constructor.name === "FrameExecutionContext") {
++          const frame = context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      return js.evaluateExpression(context, expression, { returnByValue: true, isFunction }, arg);
++    }
+ 
+-  async evaluateExpressionHandle(expression: string, isFunction: boolean | undefined, arg: any): Promise<any> {
+-    return js.evaluateExpression(await this._executionContextPromise, expression, { returnByValue: false, isFunction }, arg);
+-  }
++  async evaluateExpressionHandle(expression: string, isFunction: boolean | undefined, arg: any, isolatedContext?: boolean): Promise<any> {
++    let context = await this._executionContextPromise;
++      if (this._context.constructor.name === "FrameExecutionContext") {
++          const frame = this._context.frame;
++          if (frame) {
++              if (isolatedContext) context = await frame._utilityContext();
++              else if (!isolatedContext) context = await frame._mainContext();
++          }
++      }
++      return js.evaluateExpression(context, expression, { returnByValue: false, isFunction }, arg);
++    }
+ }
+ 
+ type BindingPayload = {
+@@ -863,20 +878,16 @@
+ };
+ 
+ export class PageBinding {
+-  static kPlaywrightBinding = '__playwright__binding__';
+-
+   readonly name: string;
+   readonly playwrightFunction: frames.FunctionWithSource;
+-  readonly initScript: InitScript;
+   readonly needsHandle: boolean;
+   readonly internal: boolean;
+ 
+   constructor(name: string, playwrightFunction: frames.FunctionWithSource, needsHandle: boolean) {
+     this.name = name;
+     this.playwrightFunction = playwrightFunction;
+-    this.initScript = new InitScript(`(${addPageBinding.toString()})(${JSON.stringify(PageBinding.kPlaywrightBinding)}, ${JSON.stringify(name)}, ${needsHandle}, (${source})())`, true /* internal */);
++    this.source = `(${addPageBinding.toString()})(${JSON.stringify(name)}, ${needsHandle}, (${source})())`;
+     this.needsHandle = needsHandle;
+-    this.internal = name.startsWith('__pw');
+   }
+ 
+   static async dispatch(page: Page, payload: string, context: dom.FrameExecutionContext) {
+@@ -916,10 +927,13 @@
+       callbacks.delete(arg.seq);
+     }
+   }
++
++  readonly source: string;
+ }
+ 
+-function addPageBinding(playwrightBinding: string, bindingName: string, needsHandle: boolean, utilityScriptSerializers: ReturnType<typeof source>) {
+-  const binding = (globalThis as any)[playwrightBinding];
++function addPageBinding(bindingName: string, needsHandle: boolean, utilityScriptSerializers: ReturnType<typeof source>) {
++  const binding = (globalThis as any)[bindingName];
++  if (binding && binding.toString().startsWith("(...args) => {")) return
+   (globalThis as any)[bindingName] = (...args: any[]) => {
+     const me = (globalThis as any)[bindingName];
+     if (needsHandle && args.slice(1).some(arg => arg !== undefined))
+@@ -953,7 +967,6 @@
+     binding(JSON.stringify(payload));
+     return promise;
+   };
+-  (globalThis as any)[bindingName].__installed = true;
+ }
+ 
+ export class InitScript {
+@@ -963,14 +976,7 @@
+ 
+   constructor(source: string, internal?: boolean, name?: string) {
+     const guid = createGuid();
+-    this.source = `(() => {
+-      globalThis.__pwInitScripts = globalThis.__pwInitScripts || {};
+-      const hasInitScript = globalThis.__pwInitScripts[${JSON.stringify(guid)}];
+-      if (hasInitScript)
+-        return;
+-      globalThis.__pwInitScripts[${JSON.stringify(guid)}] = true;
+-      ${source}
+-    })();`;
++    this.source = `(() => { ${source} })();`;
+     this.internal = !!internal;
+     this.name = name;
+   }
+diff -ruN playwright_not_patched/packages/playwright-core/src/server/webkit/wkPage.ts playwright/packages/playwright-core/src/server/webkit/wkPage.ts
+--- playwright_not_patched/packages/playwright-core/src/server/webkit/wkPage.ts	2025-02-20 16:47:20.813538954 +0000
++++ playwright/packages/playwright-core/src/server/webkit/wkPage.ts	2025-02-20 16:47:27.472576598 +0000
+@@ -769,7 +769,7 @@
+     await this._updateBootstrapScript();
+   }
+ 
+-  async removeNonInternalInitScripts() {
++  async removeInitScripts() {
+     await this._updateBootstrapScript();
+   }
+ 
+diff -ruN playwright_not_patched/packages/protocol/src/channels.d.ts playwright/packages/protocol/src/channels.d.ts
+--- playwright_not_patched/packages/protocol/src/channels.d.ts	2025-02-20 16:47:20.865539248 +0000
++++ playwright/packages/protocol/src/channels.d.ts	2025-02-20 16:47:27.467576570 +0000
+@@ -2800,6 +2800,7 @@
+   expression: string,
+   isFunction?: boolean,
+   arg: SerializedArgument,
++  isolatedContext?: boolean;
+ };
+ export type FrameEvaluateExpressionOptions = {
+   isFunction?: boolean,
+@@ -2811,6 +2812,7 @@
+   expression: string,
+   isFunction?: boolean,
+   arg: SerializedArgument,
++  isolatedContext?: boolean;
+ };
+ export type FrameEvaluateExpressionHandleOptions = {
+   isFunction?: boolean,
+@@ -3260,6 +3262,7 @@
+   expression: string,
+   isFunction?: boolean,
+   arg: SerializedArgument,
++  isolatedContext?: boolean;
+ };
+ export type WorkerEvaluateExpressionOptions = {
+   isFunction?: boolean,
+@@ -3271,6 +3274,7 @@
+   expression: string,
+   isFunction?: boolean,
+   arg: SerializedArgument,
++  isolatedContext?: boolean;
+ };
+ export type WorkerEvaluateExpressionHandleOptions = {
+   isFunction?: boolean,
+@@ -3309,6 +3313,7 @@
+   expression: string,
+   isFunction?: boolean,
+   arg: SerializedArgument,
++  isolatedContext?: boolean;
+ };
+ export type JSHandleEvaluateExpressionOptions = {
+   isFunction?: boolean,
